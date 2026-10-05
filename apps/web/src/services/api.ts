@@ -9,6 +9,7 @@ export type DisasterSummary = {
   district?: string | null;
   centroid: { latitude: number; longitude: number } | null;
   severity: "critical" | "high" | "moderate" | string;
+  severityBasis?: string;
   closed: boolean;
   mode: "live" | "demo";
   source: string;
@@ -49,6 +50,15 @@ export type DisasterDetail = DisasterSummary & {
     acquisitionTime?: string;
     fileName?: string;
     uuid?: string;
+    new?: boolean | null;
+  }>;
+  impactPoints?: Array<{
+    id?: string;
+    latitude: number;
+    longitude: number;
+    severity?: string;
+    severityBasis?: string;
+    population?: number | null;
   }>;
 };
 
@@ -82,6 +92,38 @@ export type AffectedCluster = {
   longitude: number;
   areaKm2: number | null;
   geometry: GeoJSON.Geometry | null;
+  severity?: string;
+  populationEstimate?: number | null;
+  populationEstimateMethod?: string;
+  originMethod?: string;
+  assignedHospitalId?: string | null;
+  assignmentStatus?: string;
+  routingStatus?: string;
+  routingFailure?: string | null;
+  debug?: {
+    clusterConfig: {
+      radiusKm: number;
+      minimumAffectedPoints: number;
+      maxClusters: number;
+    };
+    clusterOriginMethod: string;
+    pointObservationStatus: string;
+    roadMatrixCandidateCount: number;
+    candidateScores: Array<{
+      hospitalId: string;
+      hospitalName: string;
+      roadKm: number;
+      durationMin: number;
+      score: number;
+      scoreBreakdown: Record<string, number>;
+    }>;
+    rejectedCandidates: Array<{
+      hospitalId: string;
+      hospitalName: string;
+      reason: string;
+    }>;
+    attemptedCandidateCount: number;
+  };
 };
 
 export type ClusterHospitalRoute = {
@@ -100,6 +142,12 @@ export type ClusterHospitalRoute = {
     distanceKm: number | null;
     durationMin: number | null;
   }>;
+  score?: number;
+  scoreBreakdown?: Record<string, number>;
+  scoreWeights?: Record<string, number>;
+  estimatedTravelTime?: boolean;
+  liveTraffic?: boolean;
+  routeSnapDistanceKm?: { origin: number; destination: number };
   rankingBasis: string;
   selectionReason: string;
 };

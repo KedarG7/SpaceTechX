@@ -12,30 +12,111 @@ export function haversineKm(lat1, lon1, lat2, lon2) {
 
 export function parsePoint(point) {
   if (!point) return null;
-  if (typeof point === "object" && point.longitude != null) return point;
+  if (typeof point === "object" && point.longitude != null) {
+    const longitude = Number(point.longitude);
+    const latitude = Number(point.latitude);
+    return Number.isFinite(longitude) &&
+      Number.isFinite(latitude) &&
+      Math.abs(longitude) <= 180 &&
+      Math.abs(latitude) <= 90
+      ? { longitude, latitude }
+      : null;
+  }
   const match = String(point).match(/POINT\s*\(\s*([-\d.]+)\s+([-\d.]+)\s*\)/i);
   if (!match) return null;
-  return { longitude: Number(match[1]), latitude: Number(match[2]) };
+  const longitude = Number(match[1]);
+  const latitude = Number(match[2]);
+  return Number.isFinite(longitude) &&
+    Number.isFinite(latitude) &&
+    Math.abs(longitude) <= 180 &&
+    Math.abs(latitude) <= 90
+    ? { longitude, latitude }
+    : null;
+}
+
+function parseWktGroup(text, cursor) {
+  while (/\s/.test(text[cursor.index] || "")) cursor.index += 1;
+  if (text[cursor.index] !== "(") return null;
+  cursor.index += 1;
+  const values = [];
+  while (cursor.index < text.length) {
+    while (/\s/.test(text[cursor.index] || "")) cursor.index += 1;
+    if (text[cursor.index] === "(") {
+      const nested = parseWktGroup(text, cursor);
+      if (!nested) return null;
+      values.push(nested);
+    } else {
+      const start = cursor.index;
+      while (cursor.index < text.length && ![",", ")"].includes(text[cursor.index])) {
+        cursor.index += 1;
+      }
+      const pair = text.slice(start, cursor.index).trim().split(/\s+/).map(Number);
+      if (pair.length < 2 || !pair.every(Number.isFinite)) return null;
+      values.push(pair.slice(0, 2));
+    }
+    while (/\s/.test(text[cursor.index] || "")) cursor.index += 1;
+    if (text[cursor.index] === ",") {
+      cursor.index += 1;
+      continue;
+    }
+    if (text[cursor.index] === ")") {
+      cursor.index += 1;
+      return values;
+    }
+    return null;
+  }
+  return null;
+}
+
+function closeAndValidateRing(ring) {
+  if (!Array.isArray(ring) || ring.length < 3) return null;
+  const coordinates = ring.map((position) => {
+    if (
+      !Array.isArray(position) ||
+      position.length !== 2 ||
+      !position.every(Number.isFinite) ||
+      Math.abs(position[0]) > 180 ||
+      Math.abs(position[1]) > 90
+    ) return null;
+    return [position[0], position[1]];
+  });
+  if (coordinates.some((position) => position === null)) return null;
+  const first = coordinates[0];
+  const last = coordinates.at(-1);
+  if (first[0] !== last[0] || first[1] !== last[1]) coordinates.push([...first]);
+  return coordinates.length >= 4 ? coordinates : null;
 }
 
 export function parsePolygon(wkt) {
   if (!wkt) return null;
-  const match = String(wkt).match(/POLYGON\s*\(\((.+)\)\)/i);
-  if (!match) return null;
-  const rings = match[1].split("),(");
-  const coordinates = rings.map((ring) =>
-    ring
-      .split(",")
-      .map((pair) => pair.trim().split(/\s+/).map(Number))
-      .filter((xy) => xy.length === 2 && xy.every(Number.isFinite))
-  );
-  if (!coordinates[0]?.length) return null;
-  const first = coordinates[0][0];
-  const last = coordinates[0][coordinates[0].length - 1];
-  if (first[0] !== last[0] || first[1] !== last[1]) {
-    coordinates[0].push([...first]);
+  const text = String(wkt).trim();
+  const kind = text.match(/^(MULTIPOLYGON|POLYGON)\s*/i)?.[1]?.toUpperCase();
+  if (!kind) return null;
+  const cursor = { index: text.indexOf("(") };
+  const tree = parseWktGroup(text, cursor);
+  if (!tree) return null;
+  const asRings = (rings) => Array.isArray(rings)
+    ? rings.map(closeAndValidateRing)
+    : null;
+  let geometry;
+  if (kind === "POLYGON") {
+    const coordinates = asRings(tree);
+    if (!coordinates?.length || coordinates.some((ring) => !ring)) return null;
+    geometry = { type: "Polygon", coordinates };
+  } else {
+    const polygons = tree.map(asRings);
+    if (
+      !polygons.length ||
+      polygons.some((rings) => !rings?.length || rings.some((ring) => !ring))
+    ) return null;
+    geometry = { type: "MultiPolygon", coordinates: polygons };
   }
-  return { type: "Polygon", coordinates };
+  try {
+    const parsed = feature(geometry);
+    return booleanValid(parsed) && kinks(parsed).features.length === 0 ? geometry : null;
+  } catch {
+    return null;
+  }
 }
 
 export function polygonToFeature(wkt, properties = {}) {
@@ -45,32 +126,30 @@ export function polygonToFeature(wkt, properties = {}) {
 }
 
 export function centroidOfPolygon(geometry) {
-  if (!geometry?.coordinates?.[0]) return null;
-  const ring = geometry.coordinates[0];
-  let x = 0;
-  let y = 0;
-  const n = ring.length - 1;
-  for (let i = 0; i < n; i += 1) {
-    x += ring[i][0];
-    y += ring[i][1];
+  if (!geometry) return null;
+  try {
+    const shape = feature(geometry);
+    if (!booleanValid(shape) || kinks(shape).features.length > 0) return null;
+    const center = centerOfMass(shape);
+    const representative = booleanPointInPolygon(center, shape) ? center : pointOnFeature(shape);
+    const [longitude, latitude] = representative.geometry.coordinates;
+    return { longitude, latitude };
+  } catch {
+    return null;
   }
-  return { longitude: x / n, latitude: y / n };
 }
 
 /** Approximate geodesic area in km² from a GeoJSON polygon. */
 export function polygonAreaKm2(geometry) {
-  if (!geometry?.coordinates?.[0]) return null;
-  const ring = geometry.coordinates[0];
-  const R = 6371.0088;
-  let area = 0;
-  for (let i = 0; i < ring.length - 1; i += 1) {
-    const [lon1, lat1] = ring[i];
-    const [lon2, lat2] = ring[i + 1];
-    area +=
-      ((lon2 - lon1) * Math.PI) / 180 *
-      (2 + Math.sin((lat1 * Math.PI) / 180) + Math.sin((lat2 * Math.PI) / 180));
+  if (!geometry) return null;
+  try {
+    const shape = feature(geometry);
+    return booleanValid(shape) && kinks(shape).features.length === 0
+      ? area(shape) / 1_000_000
+      : null;
+  } catch {
+    return null;
   }
-  return Math.abs((area * R * R) / 2);
 }
 
 export function circlePolygon(lon, lat, radiusKm = 8, steps = 32) {
@@ -141,3 +220,12 @@ export function flattenImpact(productStats) {
     populationAffected: Number(population.affected) || null,
   };
 }
+import {
+  area,
+  booleanPointInPolygon,
+  booleanValid,
+  centerOfMass,
+  feature,
+  kinks,
+  pointOnFeature,
+} from "@turf/turf";

@@ -19,10 +19,23 @@ const STYLE: maplibregl.StyleSpecification = {
       tileSize: 256,
       attribution: TILE_ATTRIBUTION,
     },
+    fallback: {
+      type: "raster",
+      tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+      tileSize: 256,
+      attribution: "© OpenStreetMap contributors",
+    },
   },
   layers: [
     { id: "base-background", type: "background", paint: { "background-color": "#101826" } },
     { id: "satellite-imagery", type: "raster", source: "satellite" },
+    {
+      id: "fallback-imagery",
+      type: "raster",
+      source: "fallback",
+      layout: { visibility: "none" },
+      paint: { "raster-opacity": 0.92 },
+    },
   ],
 };
 
@@ -31,7 +44,7 @@ const FACILITY_COLOR: Record<string, string> = {
   police: "#60a5fa",
   ambulance: "#f472b6",
   ndrf: "#FF9933",
-  relief_centre: "#a3e635",
+  relief_centre: "#fbbf24",
   helipad: "#22d3ee",
   water: "#00cfff",
   power: "#facc15",
@@ -74,6 +87,7 @@ export default function DisasterMap({
   const ref = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<Map | null>(null);
   const ready = useRef(false);
+  const fallbackActive = useRef(false);
   const handlers = useRef({ onSelectHospital, onSelectCluster, onSelectRoute, onSelectZone, onSelectFacility });
   handlers.current = { onSelectHospital, onSelectCluster, onSelectRoute, onSelectZone, onSelectFacility };
 
@@ -121,7 +135,11 @@ export default function DisasterMap({
         type: "fill",
         source: "cluster-zones",
         paint: {
-          "fill-color": ["case", ["get", "selected"], "#52eaff", "#00a9df"],
+          "fill-color": [
+            "case",
+            ["get", "selected"], "#a8fbff",
+            ["match", ["get", "severity"], "critical", "#ff526f", "high", "#ffb44c", "moderate", "#00cfff", "#00a9df"],
+          ],
           "fill-opacity": ["case", ["get", "selected"], 0.28, 0.14],
         },
       });
@@ -130,7 +148,11 @@ export default function DisasterMap({
         type: "line",
         source: "cluster-zones",
         paint: {
-          "line-color": ["case", ["get", "selected"], "#b5fbff", "#52eaff"],
+          "line-color": [
+            "case",
+            ["get", "selected"], "#ffffff",
+            ["match", ["get", "severity"], "critical", "#ff526f", "high", "#ffb44c", "moderate", "#52eaff", "#52eaff"],
+          ],
           "line-width": ["case", ["get", "selected"], 2.5, 1.4],
           "line-dasharray": [1.5, 1],
         },
@@ -166,7 +188,12 @@ export default function DisasterMap({
         source: "clusters",
         paint: {
           "circle-radius": ["case", ["get", "selected"], 9, 7],
-          "circle-color": ["case", ["get", "selected"], "#b5fbff", "#00cfff"],
+          "circle-color": [
+            "case",
+            ["get", "selected"], "#b5fbff",
+            ["==", ["get", "routingStatus"], "unresolved"], "#ff526f",
+            "#00cfff",
+          ],
           "circle-stroke-color": "#b5fbff",
           "circle-stroke-width": 2,
         },
@@ -179,7 +206,8 @@ export default function DisasterMap({
           "text-field": ["get", "label"],
           "text-size": 10,
           "text-offset": [0, 0.05],
-          "text-allow-overlap": true,
+          "text-allow-overlap": false,
+          "symbol-sort-key": ["case", ["get", "selected"], 0, 1],
         },
         paint: { "text-color": "#ffffff", "text-halo-color": "#0369a1", "text-halo-width": 1.5 },
       });
@@ -190,9 +218,29 @@ export default function DisasterMap({
         source: "hospitals",
         paint: {
           "circle-radius": ["case", ["get", "selected"], 10, ["get", "clusterSelected"], 8, 6],
-          "circle-color": ["case", ["get", "selected"], "#ffffff", ["get", "clusterSelected"], "#5eead4", "#2dd4bf"],
+          "circle-color": ["case", ["get", "selected"], "#ffffff", ["get", "clusterSelected"], "#52eaff", "#00cfff"],
           "circle-stroke-width": 2,
           "circle-stroke-color": "#042f2e",
+        },
+      });
+      map.addLayer({
+        id: "hospitals-label",
+        type: "symbol",
+        source: "hospitals",
+        minzoom: 11,
+        layout: {
+          "text-field": ["get", "name"],
+          "text-size": 10,
+          "text-offset": [0, 1.15],
+          "text-anchor": "top",
+          "text-max-width": 14,
+          "text-optional": true,
+          "text-allow-overlap": false,
+        },
+        paint: {
+          "text-color": "#e8fcff",
+          "text-halo-color": "#071321",
+          "text-halo-width": 1.5,
         },
       });
       map.addSource("facilities", { type: "geojson", data: emptyFc() });
@@ -257,6 +305,50 @@ export default function DisasterMap({
       map.on("click", "cluster-core", (e) => {
         const clusterId = String(e.features?.[0]?.properties?.id || "");
         if (clusterId) handlers.current.onSelectCluster?.(clusterId);
+      });
+      const clusterPopup = new Popup({ closeButton: false, closeOnClick: false, offset: 12 });
+      let hoveredClusterId = "";
+      map.on("mousemove", "cluster-core", (e) => {
+        const feature = e.features?.[0];
+        if (!feature) return;
+        const id = String(feature.properties?.id || "");
+        clusterPopup.setLngLat(e.lngLat);
+        if (id !== hoveredClusterId) {
+          hoveredClusterId = id;
+          clusterPopup.setDOMContent(
+            popupContent(
+              `${id} · ${feature.properties?.severity || "severity unknown"}`,
+              `${feature.properties?.routingStatus === "unresolved" ? "No validated route" : "Click to inspect ranked hospital routes"}`
+            )
+          );
+        }
+        if (!clusterPopup.isOpen()) clusterPopup.addTo(map);
+      });
+      map.on("mouseleave", "cluster-core", () => {
+        hoveredClusterId = "";
+        clusterPopup.remove();
+      });
+      const hospitalPopup = new Popup({ closeButton: false, closeOnClick: false, offset: 10 });
+      let hoveredHospitalId = "";
+      map.on("mousemove", "hospitals-circle", (e) => {
+        const hospital = e.features?.[0]?.properties;
+        if (!hospital) return;
+        const id = String(hospital.id || "");
+        hospitalPopup.setLngLat(e.lngLat);
+        if (id !== hoveredHospitalId) {
+          hoveredHospitalId = id;
+          hospitalPopup.setDOMContent(
+            popupContent(
+              String(hospital.name || "Hospital directory entry"),
+              `${hospital.operationalStatus || "Operational status unknown"} · ${hospital.distance ?? "—"} km geographic distance`
+            )
+          );
+        }
+        if (!hospitalPopup.isOpen()) hospitalPopup.addTo(map);
+      });
+      map.on("mouseleave", "hospitals-circle", () => {
+        hoveredHospitalId = "";
+        hospitalPopup.remove();
       });
       const affectedAreaPopup = new Popup({ closeButton: false, closeOnClick: false, offset: 10 });
       let hoveredZoneName = "";
@@ -402,6 +494,7 @@ export default function DisasterMap({
               id: hospital.id,
               name: hospital.name,
               distance: hospital.distanceKm,
+              operationalStatus: hospital.operationalStatus || "Unknown",
               selected: hospital.id === selectedHospitalId,
               clusterSelected: clusterId === selectedClusterId,
               routeId,
@@ -421,6 +514,7 @@ export default function DisasterMap({
                   id: cluster.id,
                   label: cluster.id.split("-").at(-1)?.replace("C", "") || cluster.name,
                   selected: cluster.id === selectedClusterId,
+                  severity: cluster.severity,
                 },
                 geometry: cluster.geometry,
               }]
@@ -440,6 +534,8 @@ export default function DisasterMap({
               id: cluster.id,
               label: String(index + 1),
               selected: cluster.id === selectedClusterId,
+              severity: cluster.severity,
+              routingStatus: cluster.routingStatus,
             },
             geometry: {
               type: "Point" as const,
@@ -470,9 +566,8 @@ export default function DisasterMap({
         })),
     });
 
-    const clusterColors = ["#00e5ff", "#36f3e4", "#17baff", "#72f7ff", "#00cfff", "#64eaff"];
     const routeFeatures = layers.routes
-      ? clusterRoutes.flatMap((cluster, clusterIndex) =>
+      ? clusterRoutes.flatMap((cluster) =>
           cluster.hospitalRoutes.flatMap((route) =>
             route.routeGeometry
               ? [{
@@ -489,7 +584,8 @@ export default function DisasterMap({
                       route.id === selectedRouteId ||
                       (!selectedRouteId && cluster.id === selectedClusterId && route.rank === 1),
                     clusterSelected: cluster.id === selectedClusterId,
-                    routeColor: route.rank === 1 ? clusterColors[clusterIndex % clusterColors.length] : "#fbbf24",
+                    routeColor: route.routeType === "recommended" ? "#00e5ff" : "#ffb44c",
+                    routeType: route.routeType,
                   },
                   geometry: route.routeGeometry,
                 }]
@@ -518,7 +614,10 @@ export default function DisasterMap({
 
     const visibility = (id: string, visible: boolean) =>
       map.setLayoutProperty(id, "visibility", visible ? "visible" : "none");
-    visibility("satellite-imagery", Boolean(layers.imagery));
+    visibility("satellite-imagery", Boolean(layers.imagery) && !fallbackActive.current);
+    visibility("fallback-imagery", Boolean(layers.imagery) && fallbackActive.current);
+    visibility("hospitals-label", Boolean(layers.hospitals));
+    if (!layers.imagery) fallbackActive.current = false;
     visibility("base-background", !layers.imagery);
   }, [
     disaster,
@@ -530,6 +629,31 @@ export default function DisasterMap({
     selectedRouteId,
     clusterRoutes,
   ]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    const handleMapError = (event: maplibregl.ErrorEvent) => {
+      if (
+        !fallbackActive.current &&
+        "sourceId" in event &&
+        event.sourceId === "satellite" &&
+        map.getLayer("fallback-imagery")
+      ) {
+        fallbackActive.current = true;
+        map.setLayoutProperty("satellite-imagery", "visibility", "none");
+        map.setLayoutProperty(
+          "fallback-imagery",
+          "visibility",
+          layers.imagery ? "visible" : "none"
+        );
+      }
+    };
+    map.on("error", handleMapError);
+    return () => {
+      map.off("error", handleMapError);
+    };
+  }, [layers.imagery]);
 
   useEffect(() => {
     const map = mapRef.current;

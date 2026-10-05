@@ -1,3 +1,5 @@
+import { haversineKm } from "../utils/geo.js";
+
 const ROUTING_PROVIDER = (process.env.ROUTING_PROVIDER || "osrm").toLowerCase();
 if (!["osrm", "ors"].includes(ROUTING_PROVIDER)) {
   throw new Error("ROUTING_PROVIDER must be either 'osrm' or 'ors'");
@@ -9,8 +11,9 @@ const CACHE_TTL_MS = Number(process.env.ROUTE_CACHE_TTL_MS) || 5 * 60 * 1000;
 const REQUEST_INTERVAL_MS = Math.max(0, Number(process.env.ROUTING_REQUEST_INTERVAL_MS) || 700);
 const configuredCandidates = Number(process.env.MAX_HOSPITAL_ROUTES_PER_CLUSTER);
 const MAX_ROUTE_CANDIDATES = Number.isInteger(configuredCandidates)
-  ? Math.min(3, Math.max(1, configuredCandidates))
-  : 2;
+  ? Math.min(5, Math.max(3, configuredCandidates))
+  : 4;
+const MAX_ROUTE_SNAP_KM = Number(process.env.MAX_ROUTE_SNAP_KM) || 2;
 
 const cache = new Map();
 const pendingRoutes = new Map();
@@ -83,6 +86,56 @@ function routeProviderUnavailable(error) {
   };
 }
 
+export function validateRouteGeometry(from, to, route) {
+  const coordinates = route?.geometry?.type === "LineString"
+    ? route.geometry.coordinates
+    : null;
+  if (!Array.isArray(coordinates) || coordinates.length < 2) {
+    return { valid: false, reason: "Route geometry is missing or is not a LineString" };
+  }
+  if (coordinates.some((coordinate) =>
+    !Array.isArray(coordinate) ||
+    coordinate.length < 2 ||
+    !Number.isFinite(coordinate[0]) ||
+    !Number.isFinite(coordinate[1]) ||
+    Math.abs(coordinate[0]) > 180 ||
+    Math.abs(coordinate[1]) > 90
+  )) {
+    return { valid: false, reason: "Route geometry contains invalid coordinates" };
+  }
+  if (
+    !Number.isFinite(route.distanceKm) ||
+    route.distanceKm <= 0 ||
+    !Number.isFinite(route.durationMin) ||
+    route.durationMin <= 0
+  ) {
+    return { valid: false, reason: "Route distance or duration is missing or invalid" };
+  }
+
+  const [startLon, startLat] = coordinates[0];
+  const [endLon, endLat] = coordinates.at(-1);
+  const startSnapKm = haversineKm(from.latitude, from.longitude, startLat, startLon);
+  const endSnapKm = haversineKm(to.latitude, to.longitude, endLat, endLon);
+  if (startSnapKm > MAX_ROUTE_SNAP_KM || endSnapKm > MAX_ROUTE_SNAP_KM) {
+    return {
+      valid: false,
+      reason: `Road snap exceeds ${MAX_ROUTE_SNAP_KM} km`,
+      startSnapKm: Number(startSnapKm.toFixed(2)),
+      endSnapKm: Number(endSnapKm.toFixed(2)),
+    };
+  }
+
+  const directKm = haversineKm(from.latitude, from.longitude, to.latitude, to.longitude);
+  if (route.distanceKm + 1 < directKm * 0.8) {
+    return { valid: false, reason: "Road route distance is implausibly shorter than the direct distance" };
+  }
+  return {
+    valid: true,
+    startSnapKm: Number(startSnapKm.toFixed(2)),
+    endSnapKm: Number(endSnapKm.toFixed(2)),
+  };
+}
+
 async function requestOsrmRoute(from, to) {
   const coordinates = `${from.longitude},${from.latitude};${to.longitude},${to.latitude}`;
   const url = `${OSRM_URL}/route/v1/driving/${coordinates}?overview=full&geometries=geojson&alternatives=false&steps=true`;
@@ -109,7 +162,7 @@ async function requestOsrmRoute(from, to) {
     engine: "OSRM",
     source: "OpenStreetMap road network via OSRM",
     distanceKm: Number((route.distance / 1000).toFixed(2)),
-    durationMin: Math.round(route.duration / 60),
+    durationMin: Math.max(1, Math.round(route.duration / 60)),
     geometry: route.geometry,
     directions,
     confidence: "road-network",
@@ -146,7 +199,7 @@ async function requestOrsRoute(from, to) {
     engine: "OpenRouteService",
     source: "OpenStreetMap road network via OpenRouteService",
     distanceKm: Number((summary.distance / 1000).toFixed(2)),
-    durationMin: Math.round(summary.duration / 60),
+    durationMin: Math.max(1, Math.round(summary.duration / 60)),
     geometry: feature.geometry,
     directions,
     confidence: "road-network",
@@ -165,7 +218,20 @@ export async function routeBetween(from, to) {
       const route = ROUTING_PROVIDER === "ors"
         ? await requestOrsRoute(from, to)
         : await requestOsrmRoute(from, to);
-      cacheSet(key, route);
+      const validation = validateRouteGeometry(from, to, route);
+      if (!validation.valid) {
+        const unavailable = routeProviderUnavailable(new Error(validation.reason));
+        unavailable.snapDistanceKm = {
+          origin: validation.startSnapKm ?? null,
+          destination: validation.endSnapKm ?? null,
+        };
+        return unavailable;
+      }
+      route.snapDistanceKm = {
+        origin: validation.startSnapKm,
+        destination: validation.endSnapKm,
+      };
+      if (route.status === "routed") cacheSet(key, route);
       return route;
     } catch (error) {
       return routeProviderUnavailable(error);
@@ -207,7 +273,16 @@ export async function routeTable(origins, destinations) {
             metrics: ["distance", "duration"],
           }),
         });
-        if (!data.durations || !data.distances) throw new Error("No road matrix returned");
+        if (
+          !Array.isArray(data.durations) ||
+          !Array.isArray(data.distances) ||
+          data.durations.length !== origins.length ||
+          data.distances.length !== origins.length ||
+          data.durations.some((row) => !Array.isArray(row) || row.length !== destinations.length) ||
+          data.distances.some((row) => !Array.isArray(row) || row.length !== destinations.length)
+        ) {
+          throw new Error("Road matrix dimensions do not match the requested locations");
+        }
         const matrix = { durations: data.durations, distances: data.distances };
         cacheSet(key, matrix);
         return matrix;
@@ -220,7 +295,16 @@ export async function routeTable(origins, destinations) {
       const destinationIndices = destinations.map((_destination, index) => origins.length + index).join(";");
       const url = `${OSRM_URL}/table/v1/driving/${coordinates}?sources=${sources}&destinations=${destinationIndices}&annotations=duration,distance`;
       data = await scheduleRequest(url);
-      if (!data.durations || !data.distances) throw new Error("No road matrix returned");
+      if (
+        !Array.isArray(data.durations) ||
+        !Array.isArray(data.distances) ||
+        data.durations.length !== origins.length ||
+        data.distances.length !== origins.length ||
+        data.durations.some((row) => !Array.isArray(row) || row.length !== destinations.length) ||
+        data.distances.some((row) => !Array.isArray(row) || row.length !== destinations.length)
+      ) {
+        throw new Error("Road matrix dimensions do not match the requested locations");
+      }
       const matrix = { durations: data.durations, distances: data.distances };
       cacheSet(key, matrix);
       return matrix;

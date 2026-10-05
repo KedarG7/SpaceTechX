@@ -20,8 +20,22 @@ import {
 } from "../services/routingService.js";
 import { listAudit, recordAudit } from "../services/auditService.js";
 import { answerOperator, generateSitrep } from "../services/intelligenceService.js";
+import { validateAffectedClusters } from "../services/clusterValidation.js";
+import {
+  assignDistinctRecommendations,
+  rankHospitalCandidates,
+  routeScoringWeights,
+} from "../services/hospitalRanking.js";
+import { haversineKm } from "../utils/geo.js";
 
 export const api = Router();
+
+function validCoordinate(latitude, longitude) {
+  return Number.isFinite(latitude) &&
+    Number.isFinite(longitude) &&
+    Math.abs(latitude) <= 90 &&
+    Math.abs(longitude) <= 180;
+}
 
 function originOf(disaster) {
   if (!disaster?.centroid) return null;
@@ -47,7 +61,8 @@ api.get("/disasters", async (req, res) => {
     });
     recordAudit({ action: "list_disasters", detail: { mode, count: payload.items.length } });
     res.json(payload);
-  } catch {
+  } catch (error) {
+    console.error("Unable to fetch disaster data", error);
     res.status(500).json({ error: "Unable to fetch disaster data" });
   }
 });
@@ -62,7 +77,8 @@ api.get("/disasters/:id", async (req, res) => {
       dataSources: [disaster.source],
     });
     res.json(disaster);
-  } catch {
+  } catch (error) {
+    console.error(`Unable to fetch activation detail ${req.params.id}`, error);
     res.status(500).json({ error: "Unable to fetch activation detail" });
   }
 });
@@ -84,7 +100,8 @@ api.get("/disasters/:id/area", async (req, res) => {
       layers: disaster.layers || [],
       source: disaster.source,
     });
-  } catch {
+  } catch (error) {
+    console.error(`Unable to fetch affected area ${req.params.id}`, error);
     res.status(500).json({ error: "Unable to fetch affected area" });
   }
 });
@@ -121,7 +138,8 @@ api.get("/disasters/:id/hospitals", async (req, res) => {
       engine: isPostgisEnabled() ? "postgis" : "haversine",
       hospitals: withRoutes,
     });
-  } catch {
+  } catch (error) {
+    console.error(`Unable to query hospitals for ${req.params.id}`, error);
     res.status(500).json({ error: "Unable to query hospitals" });
   }
 });
@@ -133,7 +151,8 @@ api.get("/disasters/:id/facilities", async (req, res) => {
     const origin = originOf(disaster);
     const facilities = await nearestFacilities(origin.latitude, origin.longitude);
     res.json({ incident: disaster.code, origin, facilities });
-  } catch {
+  } catch (error) {
+    console.error(`Unable to query facilities for ${req.params.id}`, error);
     res.status(500).json({ error: "Unable to query facilities" });
   }
 });
@@ -155,38 +174,53 @@ api.get("/disasters/:id/routes", async (req, res) => {
       detail: { facilityId: targetId || "top-hospitals" },
     });
     res.json({ incident: disaster.code, routes });
-  } catch {
+  } catch (error) {
+    console.error(`Unable to compute routes for ${req.params.id}`, error);
     res.status(500).json({ error: "Unable to compute routes" });
   }
 });
 
 api.post("/disasters/:id/cluster-routes", async (req, res) => {
+  let disaster;
   try {
-    const disaster = await getDisaster(req.params.id);
+    disaster = await getDisaster(req.params.id);
     if (!disaster) return res.status(404).json({ error: "Activation not found" });
-    const clusters = req.body?.clusters;
-    if (
-      !Array.isArray(clusters) ||
-      clusters.length < 1 ||
-      clusters.length > 12 ||
-      clusters.some(
-        (cluster) =>
-          typeof cluster?.id !== "string" ||
-          !Number.isFinite(cluster.latitude) ||
-          !Number.isFinite(cluster.longitude) ||
-          Math.abs(cluster.latitude) > 90 ||
-          Math.abs(cluster.longitude) > 180 ||
-          typeof cluster.parentZoneId !== "string"
-      )
-    ) {
-      return res.status(400).json({ error: "Provide 1–12 affected-area clusters with valid coordinates and parent zones" });
-    }
+  } catch (error) {
+    console.error("Unable to load activation for cluster routing", error);
+    return res.status(500).json({ error: "Unable to load activation for cluster routing" });
+  }
 
+  let clusters;
+  try {
+    clusters = validateAffectedClusters(req.body?.clusters, disaster);
+  } catch (error) {
+    return res.status(400).json({ error: error.message || "Invalid affected-area clusters" });
+  }
+  const clusterConfig = req.body?.clusterConfig || {};
+  const clusterRadiusKm = Number(clusterConfig.radiusKm ?? 0.75);
+  const minimumAffectedPoints = Number(clusterConfig.minimumAffectedPoints ?? 3);
+  const requestedMaxClusters = Number(clusterConfig.maxClusters ?? clusters.length);
+  if (
+    !Number.isFinite(clusterRadiusKm) ||
+    clusterRadiusKm <= 0 ||
+    clusterRadiusKm > 20 ||
+    !Number.isInteger(minimumAffectedPoints) ||
+    minimumAffectedPoints < 1 ||
+    minimumAffectedPoints > 100 ||
+    !Number.isInteger(requestedMaxClusters) ||
+    requestedMaxClusters < 1 ||
+    requestedMaxClusters > 12
+  ) {
+    return res.status(400).json({ error: "Cluster radius, minimum points, or maximum cluster count is outside its allowed range" });
+  }
+
+  try {
+    const maxRouteCandidates = getRoutingConfig().maxRouteCandidates;
     const candidatesByCluster = await Promise.all(
       clusters.map(async (cluster) => {
         const hospitals = await nearestHospitals(cluster.latitude, cluster.longitude, {
-          limit: 6,
-          radiusKm: 120,
+          limit: 20,
+          radiusKm: 250,
         });
         return { cluster, hospitals };
       })
@@ -201,118 +235,179 @@ api.post("/disasters/:id/cluster-routes", async (req, res) => {
       uniqueHospitals
     );
     const hasRoadNetworkMetrics = Boolean(
-      matrix?.durations?.some((row) => row?.some((duration) => Number.isFinite(duration))) ||
-        matrix?.distances?.some((row) => row?.some((distance) => Number.isFinite(distance)))
+      matrix?.durations?.some((row, rowIndex) =>
+        row?.some((duration, columnIndex) =>
+          Number.isFinite(duration) &&
+          duration > 0 &&
+          Number.isFinite(matrix?.distances?.[rowIndex]?.[columnIndex]) &&
+          matrix.distances[rowIndex][columnIndex] > 0
+        )
+      )
     );
     const hospitalIndex = new Map(uniqueHospitals.map((hospital, index) => [hospital.id, index]));
 
-    const routedClusters = await Promise.all(
-      candidatesByCluster.map(async ({ cluster, hospitals }, clusterIndex) => {
-        const rankedUnsorted = hospitals
-          .map((hospital) => {
+    const candidatesWithMatrix = candidatesByCluster.map(({ cluster, hospitals }, clusterIndex) => {
+      const roadCandidates = hospitals.map((hospital) => {
             const destinationIndex = hospitalIndex.get(hospital.id);
             const durationSeconds = destinationIndex == null ? null : matrix?.durations?.[clusterIndex]?.[destinationIndex];
             const distanceMeters = destinationIndex == null ? null : matrix?.distances?.[clusterIndex]?.[destinationIndex];
             const roadKm = Number.isFinite(distanceMeters) ? Number((distanceMeters / 1000).toFixed(2)) : null;
             const durationMin = Number.isFinite(durationSeconds) ? Math.round(durationSeconds / 60) : null;
-            return { hospital, roadKm, durationMin };
-          });
-        const maxRoadKm = Math.max(1, ...rankedUnsorted.map((entry) => entry.roadKm || entry.hospital.distanceKm));
-        const maxDurationMin = Math.max(1, ...rankedUnsorted.map((entry) => entry.durationMin || entry.hospital.distanceKm * 2));
-        const maxGeographicKm = Math.max(1, ...rankedUnsorted.map((entry) => entry.hospital.distanceKm));
-        const ranked = rankedUnsorted
-          .map((entry) => {
-            const durationScore = entry.durationMin != null
-              ? (entry.durationMin / maxDurationMin) * 70
-              : (entry.hospital.distanceKm / maxGeographicKm) * 70;
-            const distanceScore = entry.roadKm != null
-              ? (entry.roadKm / maxRoadKm) * 30
-              : (entry.hospital.distanceKm / maxGeographicKm) * 30;
-            const emergencyPenalty = entry.hospital.emergency ? 0 : 25;
-            const directoryBedTieBreaker = Math.min(0.5, (entry.hospital.beds || 0) / 4000);
             return {
-              ...entry,
-              accessibilityCost: durationScore + distanceScore + emergencyPenalty - directoryBedTieBreaker,
+              hospital,
+              roadKm,
+              durationMin,
+              routeReachable: roadKm != null && durationMin != null && roadKm > 0 && durationMin > 0,
+              geographicKm: haversineKm(cluster.latitude, cluster.longitude, hospital.latitude, hospital.longitude),
             };
-          })
-          .sort((left, right) => left.accessibilityCost - right.accessibilityCost);
+          });
+      const ranked = rankHospitalCandidates(
+        roadCandidates.filter((candidate) => candidate.routeReachable),
+        { severity: cluster.severity }
+      );
+      return { cluster, hospitals, roadCandidates, ranked };
+    });
+    const initialAssignments = assignDistinctRecommendations(
+      candidatesWithMatrix.map(({ cluster, ranked }) => ({ ...cluster, candidates: ranked }))
+    );
 
-        const selected = [];
-        for (const candidate of ranked) {
-          if (selected.length >= getRoutingConfig().maxRouteCandidates) break;
-          const bearing = (hospital) =>
-            (Math.atan2(
-              Math.sin(((hospital.longitude - cluster.longitude) * Math.PI) / 180) *
-                Math.cos((hospital.latitude * Math.PI) / 180),
-              Math.cos((cluster.latitude * Math.PI) / 180) *
-                Math.sin((hospital.latitude * Math.PI) / 180) -
-                Math.sin((cluster.latitude * Math.PI) / 180) *
-                  Math.cos((hospital.latitude * Math.PI) / 180) *
-                  Math.cos(((hospital.longitude - cluster.longitude) * Math.PI) / 180)
-            ) *
-              180) /
-            Math.PI;
-          if (
-            selected.length === 0 ||
-            selected.every((other) => Math.abs(((bearing(candidate.hospital) - bearing(other.hospital) + 540) % 360) - 180) >= 12)
-          ) {
-            selected.push(candidate);
-          }
+    const routeResults = await Promise.all(
+      candidatesWithMatrix.map(async ({ cluster, hospitals, roadCandidates, ranked }) => {
+        const candidateLimit = Math.max(maxRouteCandidates + 1, 5);
+        const candidateIds = new Set(ranked.slice(0, candidateLimit).map(({ hospital }) => hospital.id));
+        for (const hospital of hospitals.slice(0, candidateLimit)) {
+          if (candidateIds.size >= candidateLimit) break;
+          candidateIds.add(hospital.id);
         }
-        for (const candidate of ranked) {
-          if (selected.length >= Math.min(2, getRoutingConfig().maxRouteCandidates)) break;
-          if (!selected.some((entry) => entry.hospital.id === candidate.hospital.id)) selected.push(candidate);
-        }
-
-        const hospitalRoutes = await Promise.all(
-          selected.map(async (candidate, index) => {
-            const route = index === 0
-              ? await routeBetween(cluster, {
-                  latitude: candidate.hospital.latitude,
-                  longitude: candidate.hospital.longitude,
-                })
-              : null;
-            const matrixHasRoadRoute = candidate.roadKm != null || candidate.durationMin != null;
-            const routeStatus = route?.status === "routed" || matrixHasRoadRoute
-              ? "routed"
-              : "unavailable";
+        const initiallyAssignedId = initialAssignments.get(cluster.id);
+        if (initiallyAssignedId) candidateIds.add(initiallyAssignedId);
+        const selectedCandidates = hospitals
+          .filter((hospital) => candidateIds.has(hospital.id))
+          .map((hospital) => ({
+            hospital,
+            matrixCandidate: roadCandidates.find((candidate) => candidate.hospital.id === hospital.id),
+          }));
+        const rejected = [];
+        const routed = await Promise.all(
+          selectedCandidates.map(async ({ hospital, matrixCandidate }) => {
+            const route = await routeBetween(cluster, {
+              latitude: hospital.latitude,
+              longitude: hospital.longitude,
+            });
+            if (route.status !== "routed" || !route.geometry) {
+              rejected.push({
+                hospitalId: hospital.id,
+                hospitalName: hospital.name,
+                reason: route.error || "Router returned no validated road geometry",
+              });
+              return null;
+            }
             return {
-              id: `${cluster.id}:${candidate.hospital.id}`,
-              rank: index + 1,
-              routeType: index === 0 ? "recommended" : "alternative",
-              hospital: candidate.hospital,
-              roadKm: route?.distanceKm ?? candidate.roadKm,
-              durationMin: route?.durationMin ?? candidate.durationMin,
-              routeStatus,
-              routeConfidence: route?.confidence || (matrixHasRoadRoute ? "road-network" : "unavailable"),
-              routeSource: route?.status === "routed"
-                ? route.source
-                : matrixHasRoadRoute
-                  ? `${getRoutingConfig().provider} road-network matrix`
-                  : route?.source || "Road route unavailable",
-              routeGeometry: route?.geometry || null,
-              routeDirections: route?.directions || [],
-              rankingBasis: candidate.durationMin != null || candidate.roadKm != null
-                ? "Road-network distance and travel time, with emergency capability; static directory bed count is only a tie-breaker."
-                : "Geographic distance and emergency capability only; road-network ranking is unavailable.",
-              selectionReason: [
-                candidate.durationMin != null ? `Road ETA ${candidate.durationMin} min` : null,
-                candidate.roadKm != null ? `road distance ${candidate.roadKm} km` : `geographic distance ${candidate.hospital.distanceKm} km`,
-                candidate.hospital.emergency ? "emergency-capable listing" : "emergency capability not verified",
-                candidate.hospital.beds != null ? `${candidate.hospital.beds} directory beds (not live capacity)` : "capacity data unavailable",
-              ].filter(Boolean).join(" · "),
+              hospital,
+              roadKm: route.distanceKm,
+              durationMin: route.durationMin,
+              geographicKm: matrixCandidate?.geographicKm ??
+                haversineKm(cluster.latitude, cluster.longitude, hospital.latitude, hospital.longitude),
+              routeGeometry: route.geometry,
+              routeDirections: route.directions,
+              routeSource: route.source,
+              routeEngine: route.engine,
+              routeSnapDistanceKm: route.snapDistanceKm,
+              routeReachable: true,
             };
           })
         );
-
-        return { ...cluster, hospitalRoutes };
+        const scored = rankHospitalCandidates(
+          routed.filter(Boolean),
+          { severity: cluster.severity }
+        );
+        return {
+          cluster,
+          candidates: scored,
+          rejectedCandidates: rejected,
+          candidateScores: scored.map((candidate) => ({
+            hospitalId: candidate.hospital.id,
+            hospitalName: candidate.hospital.name,
+            roadKm: candidate.roadKm,
+            durationMin: candidate.durationMin,
+            score: candidate.score,
+            scoreBreakdown: candidate.scoreBreakdown,
+          })),
+          matrixCandidateCount: roadCandidates.filter((candidate) => candidate.routeReachable).length,
+        };
       })
     );
+    const assignments = assignDistinctRecommendations(routeResults);
+    const routedClusters = routeResults.map(({ cluster, candidates, rejectedCandidates, candidateScores, matrixCandidateCount }) => {
+      const assignedHospitalId = assignments.get(cluster.id) || null;
+      const ordered = [...candidates].sort((left, right) => {
+        if (left.hospital.id === assignedHospitalId) return -1;
+        if (right.hospital.id === assignedHospitalId) return 1;
+        return left.score - right.score;
+      }).slice(0, maxRouteCandidates);
+      const hospitalRoutes = ordered.map((candidate, index) => ({
+        id: `${cluster.id}:${candidate.hospital.id}`,
+        rank: index + 1,
+        routeType: candidate.hospital.id === assignedHospitalId ? "recommended" : "alternative",
+        hospital: {
+          ...candidate.hospital,
+          roadKm: candidate.roadKm,
+          durationMin: candidate.durationMin,
+          routeGeometry: candidate.routeGeometry,
+          routeConfidence: "road-network",
+          routeSource: candidate.routeSource,
+        },
+        roadKm: candidate.roadKm,
+        durationMin: candidate.durationMin,
+        estimatedTravelTime: true,
+        liveTraffic: false,
+        routeStatus: "routed",
+        routeConfidence: "road-network",
+        routeSource: candidate.routeSource,
+        routeGeometry: candidate.routeGeometry,
+        routeDirections: candidate.routeDirections,
+        routeSnapDistanceKm: candidate.routeSnapDistanceKm,
+        score: candidate.score,
+        scoreBreakdown: candidate.scoreBreakdown,
+        scoreWeights: candidate.scoreWeights,
+        rankingBasis: "Validated OSRM/OpenRouteService route geometry, estimated road travel time/distance, and published emergency listing. Live traffic, closures, and hospital availability are not supplied.",
+        selectionReason: candidate.hospital.id === assignedHospitalId
+          ? "Proposed distinct hospital for this incident's severity-prioritized cluster; hospital capacity/availability is unverified."
+          : `Road route ranks ${candidate.score.toFixed(2)} on normalized route criteria; capacity/availability is unverified.`,
+      }));
+      return {
+        ...cluster,
+        hospitalRoutes,
+        assignedHospitalId,
+        assignmentStatus: assignedHospitalId ? "proposed_unverified_availability" : "unresolved",
+        routingStatus: hospitalRoutes.length ? "routed" : "unresolved",
+        routingFailure: hospitalRoutes.length ? null : rejectedCandidates[0]?.reason || "No connected road route passed validation",
+        matrixCandidateCount,
+        ...(req.body?.debug
+          ? {
+              debug: {
+                clusterConfig: {
+                  radiusKm: clusterRadiusKm,
+                  minimumAffectedPoints,
+                  maxClusters: requestedMaxClusters,
+                },
+                clusterOriginMethod: cluster.originMethod,
+                pointObservationStatus: "Copernicus activation detail does not currently provide a point-level affected-population/damage feed; source AOI footprints are used.",
+                roadMatrixCandidateCount: matrixCandidateCount,
+                candidateScores,
+                rejectedCandidates,
+                attemptedCandidateCount: rejectedCandidates.length + candidateScores.length,
+              },
+            }
+          : {}),
+      };
+    });
+    const routedCount = routedClusters.reduce((sum, cluster) => sum + cluster.hospitalRoutes.length, 0);
     recordAudit({
       action: "cluster_routes_requested",
       incident: disaster.code,
       dataSources: ["Government of India National Hospital Directory", "OSRM/OpenStreetMap"],
-      detail: { clusterCount: clusters.length, routeCount: routedClusters.reduce((sum, cluster) => sum + cluster.hospitalRoutes.length, 0) },
+      detail: { clusterCount: clusters.length, routeCount: routedCount },
     });
     res.json({
       incident: disaster.code,
@@ -324,15 +419,26 @@ api.post("/disasters/:id/cluster-routes", async (req, res) => {
       },
       generatedAt: new Date().toISOString(),
       routingProvider: getRoutingConfig(),
-      rankingBasis: hasRoadNetworkMetrics
-        ? "Road distance and estimated travel time, prioritizing listed emergency capability. Directory bed counts are static and are not live availability."
-        : "Road-network matrix unavailable; hospitals are ranked by geographic accessibility and listed emergency capability.",
-      capacityAvailability: "Live hospital capacity/occupancy is unavailable in the source directory.",
-      routeMatrixStatus: hasRoadNetworkMetrics ? "road-network" : "geographic-fallback",
+      scoreWeights: routeScoringWeights(),
+      rankingBasis: "All returned assignments require a validated road route and are scored on route time/distance, listed emergency capability, and availability confidence. No straight-line fallback is used.",
+      capacityAvailability: "Live hospital capacity/occupancy and operational status are unavailable; all assignments are proposals, not confirmed dispatches.",
+      routeTimeBasis: "Estimated from the road network; live traffic is not included.",
+      hospitalSourceQuality: "Compiled Government of India directory seed; facility coordinates/listings and operational status require field verification.",
+      routeMatrixStatus: hasRoadNetworkMetrics ? "road-network" : "unavailable",
       routeMatrixError: matrix?.error || null,
+      clusterParameters: {
+        radiusKm: clusterRadiusKm,
+        minimumAffectedPoints,
+        maxClusters: requestedMaxClusters,
+        pointDensityClusteringUsed: false,
+        pointDensityReason: "No point-level affected-area observations are present in the Copernicus activation detail response.",
+      },
+      totalRoutedAlternatives: routedCount,
+      unresolvedClusterCount: routedClusters.filter((cluster) => !cluster.hospitalRoutes.length).length,
       clusters: routedClusters,
     });
-  } catch {
+  } catch (error) {
+    console.error(`Unable to compute cluster routes for ${disaster.code}`, error);
     res.status(500).json({ error: "Unable to compute cluster routes" });
   }
 });
@@ -358,7 +464,8 @@ api.post("/disasters/:id/sitrep", async (req, res) => {
       dataSources: [disaster.source, "GoI Hospital Directory", "OSM/OSRM"],
     });
     res.json({ incident: disaster.code, generatedAt: new Date().toISOString(), text });
-  } catch {
+  } catch (error) {
+    console.error(`Unable to generate sitrep for ${req.params.id}`, error);
     res.status(500).json({ error: "Unable to generate sitrep" });
   }
 });
@@ -390,18 +497,29 @@ api.post("/disasters/:id/assistant", async (req, res) => {
       dataSources: answer.sources,
     });
     res.json(answer);
-  } catch {
+  } catch (error) {
+    console.error(`Assistant request failed for ${req.params.id}`, error);
     res.status(500).json({ error: "Assistant unavailable" });
   }
 });
 
 api.get("/hospitals", async (req, res) => {
   if (req.query.lat && req.query.lng) {
-    const rows = await nearestHospitals(Number(req.query.lat), Number(req.query.lng), {
-      limit: Number(req.query.limit) || 10,
-      radiusKm: Number(req.query.radiusKm) || 50,
-    });
-    return res.json({ hospitals: rows });
+    const latitude = Number(req.query.lat);
+    const longitude = Number(req.query.lng);
+    if (!validCoordinate(latitude, longitude)) {
+      return res.status(400).json({ error: "Latitude and longitude must be valid WGS84 coordinates" });
+    }
+    try {
+      const rows = await nearestHospitals(latitude, longitude, {
+        limit: Math.min(20, Math.max(1, Number(req.query.limit) || 10)),
+        radiusKm: Math.min(250, Math.max(1, Number(req.query.radiusKm) || 50)),
+      });
+      return res.json({ hospitals: rows });
+    } catch (error) {
+      console.error("Unable to query hospital directory", error);
+      return res.status(500).json({ error: "Unable to query hospital directory" });
+    }
   }
   res.json({ hospitals: allHospitals() });
 });
@@ -441,22 +559,41 @@ api.post("/audit", (req, res) => {
 });
 
 api.get("/layers/geojson", async (req, res) => {
+  let target;
   try {
-    const target = new URL(String(req.query.url || ""));
+    target = new URL(String(req.query.url || ""));
     if (!ALLOWED_GEOJSON_HOSTS.has(target.host)) {
       return res.status(400).json({ error: "Host not allow-listed" });
     }
+  } catch (error) {
+    console.warn("Rejected malformed GeoJSON layer URL", error);
+    return res.status(400).json({ error: "Invalid layer URL" });
+  }
+  try {
     const response = await fetch(target);
     if (!response.ok) return res.status(502).json({ error: "Upstream layer failed" });
     const json = await response.json();
     res.json(json);
-  } catch {
-    res.status(400).json({ error: "Invalid layer URL" });
+  } catch (error) {
+    console.error("Upstream GeoJSON layer request failed", error);
+    res.status(502).json({ error: "Unable to fetch upstream layer" });
   }
 });
 
 api.post("/route", async (req, res) => {
   const { from, to } = req.body || {};
   if (!from || !to) return res.status(400).json({ error: "from and to required" });
-  res.json(await routeBetween(from, to));
+  if (!validCoordinate(Number(from.latitude), Number(from.longitude)) ||
+      !validCoordinate(Number(to.latitude), Number(to.longitude))) {
+    return res.status(400).json({ error: "Route coordinates must be valid WGS84 latitude/longitude pairs" });
+  }
+  try {
+    res.json(await routeBetween(
+      { latitude: Number(from.latitude), longitude: Number(from.longitude) },
+      { latitude: Number(to.latitude), longitude: Number(to.longitude) }
+    ));
+  } catch (error) {
+    console.error("Unexpected route request failure", error);
+    res.status(500).json({ error: "Unable to compute route" });
+  }
 });

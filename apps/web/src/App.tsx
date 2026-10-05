@@ -14,7 +14,7 @@ import {
   Users,
 } from "lucide-react";
 import DisasterMap from "./map/DisasterMap";
-import { buildAffectedClusters } from "./map/clusterZones";
+import { buildAffectedClusters, type ClusterConfig } from "./map/clusterZones";
 import TopBar from "./components/TopBar";
 import {
   apiGet,
@@ -25,6 +25,7 @@ import {
   type Facility,
   type Hospital,
 } from "./services/api";
+import { buildImageryReportTable } from "./services/responseReport";
 import type { ParentZone } from "./map/clusterZones";
 
 const INDIA_STATES_AND_UTS = [
@@ -53,6 +54,12 @@ const LAYER_DEFAULTS: Record<string, boolean> = {
   water: false,
   power: false,
   government: false,
+};
+
+const CLUSTER_CONFIG: ClusterConfig = {
+  radiusKm: Number(import.meta.env.VITE_CLUSTER_RADIUS_KM) || 0.75,
+  minimumAffectedPoints: Number(import.meta.env.VITE_CLUSTER_MIN_AFFECTED_POINTS) || 3,
+  maxClusters: Math.min(12, Math.max(1, Number(import.meta.env.VITE_MAX_CLUSTERS) || 12)),
 };
 
 function formatNum(n?: number | null) {
@@ -140,7 +147,11 @@ export default function App() {
   const [clusterRetrySequence, setClusterRetrySequence] = useState(0);
   const [routingProvider, setRoutingProvider] = useState<string>("OSRM");
   const [routeMatrixError, setRouteMatrixError] = useState<string | null>(null);
+  const [hospitalDataNotice, setHospitalDataNotice] = useState<string | null>(null);
   const [stateFilter, setStateFilter] = useState("all");
+  const [incidentQuery, setIncidentQuery] = useState("");
+  const [severityFilter, setSeverityFilter] = useState("all");
+  const [routingDebug, setRoutingDebug] = useState(false);
   const [loading, setLoading] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [refreshSequence, setRefreshSequence] = useState(0);
@@ -256,8 +267,12 @@ export default function App() {
         }];
   }, [detail]);
   const clusterOrigins = useMemo(
-    () => buildAffectedClusters(parentZones, detail?.centroid, 12),
-    [parentZones, detail?.centroid]
+    () => buildAffectedClusters(parentZones, detail?.centroid, CLUSTER_CONFIG.maxClusters, {
+      impactPoints: detail?.impactPoints,
+      incidentSeverity: detail?.severity,
+      ...CLUSTER_CONFIG,
+    }),
+    [parentZones, detail?.centroid, detail?.impactPoints]
   );
 
   useEffect(() => {
@@ -274,14 +289,18 @@ export default function App() {
       clusters: ClusterRoute[];
       routingProvider?: { provider?: string };
       routeMatrixError?: string | null;
+      hospitalSourceQuality?: string;
     }>(`/api/disasters/${selectedId}/cluster-routes`, {
       clusters: clusterOrigins,
+      debug: routingDebug,
+      clusterConfig: CLUSTER_CONFIG,
     })
       .then((data) => {
         if (!cancel) {
           setClusterRoutes(data.clusters);
           setRoutingProvider(data.routingProvider?.provider || "OSRM");
           setRouteMatrixError(data.routeMatrixError || null);
+          setHospitalDataNotice(data.hospitalSourceQuality || null);
           const firstCluster = data.clusters[0];
           setSelectedClusterId(firstCluster?.id || null);
           setExpandedClusterIds(firstCluster ? [firstCluster.id] : []);
@@ -292,7 +311,8 @@ export default function App() {
       .catch((error: unknown) => {
         console.error("Unable to load affected-area cluster routes", error);
         if (!cancel) {
-          setClusterRoutesError("Cluster routing is temporarily unavailable.");
+          const message = error instanceof Error ? error.message.slice(0, 180) : "Unknown API error";
+          setClusterRoutesError(`Cluster routing unavailable: ${message}`);
         }
       })
       .finally(() => {
@@ -301,7 +321,7 @@ export default function App() {
     return () => {
       cancel = true;
     };
-  }, [selectedId, clusterOrigins, detail, clusterRetrySequence]);
+  }, [selectedId, clusterOrigins, detail, clusterRetrySequence, routingDebug]);
 
   const states = useMemo(() => {
     const additionalStates = list
@@ -312,6 +332,14 @@ export default function App() {
 
   const filtered = list.filter((i) => {
     if (stateFilter !== "all" && (i.state || i.countries.join(", ")) !== stateFilter) return false;
+    if (severityFilter !== "all" && i.severity !== severityFilter) return false;
+    const query = incidentQuery.trim().toLowerCase();
+    if (
+      query &&
+      ![i.name, i.code, i.category, i.state, i.district]
+        .filter(Boolean)
+        .some((value) => String(value).toLowerCase().includes(query))
+    ) return false;
     return true;
   });
   const incidentGroups = Array.from(
@@ -328,12 +356,21 @@ export default function App() {
       setReportError("Finish or retry cluster routing before exporting the response report.");
       return;
     }
-    const reportWindow = window.open("", "_blank");
-    if (!reportWindow) {
-      setReportError("Allow pop-ups to generate the PDF report.");
-      return;
-    }
     setReportError(null);
+    const reportFrame = document.createElement("iframe");
+    reportFrame.title = "Response report print view";
+    reportFrame.setAttribute("aria-hidden", "true");
+    reportFrame.style.position = "fixed";
+    reportFrame.style.width = "0";
+    reportFrame.style.height = "0";
+    reportFrame.style.border = "0";
+    reportFrame.style.visibility = "hidden";
+    document.body.append(reportFrame);
+    const cleanupTimer = window.setTimeout(() => reportFrame.remove(), 10 * 60 * 1000);
+    const cleanupReportFrame = () => {
+      window.clearTimeout(cleanupTimer);
+      reportFrame.remove();
+    };
     const mapSnapshot = mapSnapshotRef.current?.() || null;
     const mainCoordinates = detail.centroid
       ? `${detail.centroid.latitude.toFixed(5)}, ${detail.centroid.longitude.toFixed(5)} (latitude, longitude)`
@@ -352,28 +389,43 @@ export default function App() {
         const steps = route.routeDirections?.length
           ? `<ol>${route.routeDirections.map((step) => `<li>${escapeHtml(step.instruction)}${step.distanceKm == null ? "" : ` · ${step.distanceKm} km`}${step.durationMin == null ? "" : ` · ${step.durationMin} min`}</li>`).join("")}</ol>`
           : `<p class="muted">${route.routeStatus === "routed" ? "Turn-by-turn directions were not provided by the routing service." : "Road route and directions unavailable."}</p>`;
-        return `<article class="route"><h4>${route.rank === 1 ? "Nearest recommended route" : `Nearest alternative ${route.rank}`} · ${escapeHtml(route.hospital.name)}</h4><p><b>Road distance:</b> ${route.roadKm == null ? "Unavailable" : `${route.roadKm} km`} · <b>ETA:</b> ${route.durationMin == null ? "Unavailable" : `${route.durationMin} min`} · <b>Route status:</b> ${escapeHtml(route.routeStatus)}</p><p><b>Cluster origin:</b> ${cluster.latitude.toFixed(5)}, ${cluster.longitude.toFixed(5)} · <b>Hospital:</b> ${route.hospital.latitude.toFixed(5)}, ${route.hospital.longitude.toFixed(5)}</p><p class="muted">${escapeHtml(route.selectionReason)}</p><p><a href="${escapeHtml(mapsUrl)}">Open this cluster-to-hospital route in Google Maps</a></p><h5>Road directions</h5>${steps}</article>`;
+        return `<article class="route"><h4>${route.rank === 1 ? "Proposed recommended route" : `Validated alternative ${route.rank}`} · ${escapeHtml(route.hospital.name)}</h4><p><b>Road distance:</b> ${route.roadKm == null ? "Unavailable" : `${route.roadKm} km`} · <b>Estimated road-network ETA (no live traffic):</b> ${route.durationMin == null ? "Unavailable" : `${route.durationMin} min`} · <b>Route status:</b> ${escapeHtml(route.routeStatus)} · <b>Score:</b> ${route.score?.toFixed(2) ?? "Unavailable"}</p><p><b>Cluster origin:</b> ${cluster.latitude.toFixed(5)}, ${cluster.longitude.toFixed(5)} · <b>Hospital:</b> ${route.hospital.latitude.toFixed(5)}, ${route.hospital.longitude.toFixed(5)}</p><p><b>Score contributions:</b> ${escapeHtml(JSON.stringify(route.scoreBreakdown || {}))}</p><p class="muted">${escapeHtml(route.selectionReason)}</p><p><a href="${escapeHtml(mapsUrl)}">Open this cluster-to-hospital route in Google Maps</a></p><h5>Road directions</h5>${steps}</article>`;
       }).join("");
-      return `<section><h3>${escapeHtml(cluster.name)} <span class="muted">· ${escapeHtml(cluster.id)}</span></h3><p><b>Parent affected zone:</b> ${escapeHtml(cluster.parentZoneName)} (${escapeHtml(cluster.parentZoneId)}) · <b>Cluster coordinates:</b> ${cluster.latitude.toFixed(5)}, ${cluster.longitude.toFixed(5)} (latitude, longitude)${cluster.areaKm2 == null ? "" : ` · <b>Area:</b> ${cluster.areaKm2} km²`}</p>${routeContent || '<p class="muted">No suitable hospital routes are available for this cluster.</p>'}</section>`;
+      return `<section><h3>${escapeHtml(cluster.name)} <span class="muted">· ${escapeHtml(cluster.id)}</span></h3><p><b>Parent affected zone:</b> ${escapeHtml(cluster.parentZoneName)} (${escapeHtml(cluster.parentZoneId)}) · <b>Cluster coordinates:</b> ${cluster.latitude.toFixed(5)}, ${cluster.longitude.toFixed(5)} (latitude, longitude) · <b>Severity:</b> ${escapeHtml(cluster.severity || detail.severity)} · <b>Area:</b> ${cluster.areaKm2 ?? "Unavailable"} km² · <b>Population (coarse estimate):</b> ${cluster.populationEstimate ?? "Unavailable"}</p><p class="muted">${escapeHtml(cluster.populationEstimateMethod || "No cluster-level population surface is available.")}</p>${routeContent || '<p class="muted">Unresolved: no validated road routes are available for this cluster.</p>'}</section>`;
     }).join("");
-    const imagery = detail.imagery || [];
-    const imageryContent = imagery.length
-      ? `<ul>${imagery.map((image) => `<li><b>${escapeHtml(image.sensorName || image.sensorType || "Satellite acquisition")}</b> · ${escapeHtml(image.aoiName || "AOI")} · ${escapeHtml(image.productType || "Product")} · ${escapeHtml(image.resolutionClass || "resolution not listed")} · ${escapeHtml(image.acquisitionTime || "Acquisition time unavailable")}${image.fileName ? `<br><span class="muted">${escapeHtml(image.fileName)}</span>` : ""}</li>`).join("")}</ul>`
-      : `<p class="muted">No source image acquisitions were listed for this activation.</p>`;
+    const imageryContent = buildImageryReportTable(detail.imagery);
     const productArchive = safeHttpsUrl(detail.productsPath);
     const imageSource = productArchive
-      ? `<p><a href="${escapeHtml(productArchive)}">Open official Copernicus EMS product archive (source imagery and mapping products)</a></p>`
+      ? `<p><a href="${escapeHtml(productArchive)}">Open official Copernicus EMS analysis-product archive</a></p>`
       : `<p class="muted">No downloadable product archive was provided by the source activation.</p>`;
     const mapSection = mapSnapshot
-      ? `<figure><img class="map-image" src="${mapSnapshot}" alt="Satellite basemap with affected clusters and hospital routes"><figcaption>Current satellite basemap with affected-area clusters and routed hospital links. Imagery tiles © Esri and contributors.</figcaption></figure>`
+      ? `<figure><img class="map-image" src="${mapSnapshot}" alt="Satellite basemap with affected clusters and hospital routes"><figcaption>Esri satellite basemap with the incident, cluster, facility, and route overlays. This is not the Copernicus source acquisition imagery.</figcaption></figure>`
       : `<p class="muted">Map snapshot could not be captured in this browser. Use the Google Maps route links below for navigation.</p>`;
     const shortDescription = (detail.reason || "No short incident summary supplied by the source.").slice(0, 360);
     const reportHtml = `<!doctype html><html><head><meta charset="utf-8"><title>Disaster response routing report · ${escapeHtml(detail.code)}</title><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700;800&display=swap"><style>
       *{box-sizing:border-box}body{font:14px/1.55 "Montserrat",Arial,sans-serif;color:#14243a;margin:36px auto;max-width:900px;padding:0 28px}h1{font-size:24px;margin:0 0 5px;color:#12345a}h2{font-size:17px;margin:25px 0 8px;border-bottom:1px solid #cbd9e8;padding-bottom:6px}h3{font-size:15px;margin:0 0 8px;color:#125ca1}h4{margin:12px 0 5px;color:#1269b5}h5{margin:8px 0 4px}.sub,.muted{color:#5d6f83;font-size:12px}.box{border:1px solid #d4e2ef;border-radius:10px;padding:14px 16px;margin-top:12px;background:#f5f9fd}section{break-inside:avoid;border:1px solid #d8e4ef;border-radius:10px;padding:14px 16px;margin:12px 0}.route{border-left:3px solid #3186d8;padding:2px 0 2px 13px;margin:13px 0}ol{padding-left:22px;margin:6px 0}li{margin:4px 0}a{color:#075ea8;overflow-wrap:anywhere}.map-image{width:100%;max-height:480px;object-fit:contain;border:1px solid #d4e2ef;border-radius:8px}figcaption{font-size:11px;color:#66788b;margin-top:5px}.footer{margin-top:30px;border-top:1px solid #d7e1eb;padding-top:10px;font-size:11px;color:#66788b}@media print{body{margin:0 auto;padding:0 12px}.box,section{background:#fff;break-inside:avoid}figure{break-inside:avoid}}
-    </style></head><body><h1>Disaster response · cluster routing report</h1><div class="sub">Generated ${escapeHtml(new Date().toLocaleString())} · Incident ${escapeHtml(detail.code)} · ${escapeHtml(detail.mode === "live" ? "Live Copernicus EMS" : "Demo / historical")}</div><div class="box"><b>${escapeHtml(detail.name)}</b><br>${escapeHtml(detail.category)} · ${escapeHtml(detail.state || detail.countries.join(", "))}<p>${escapeHtml(shortDescription)}</p><b>Main affected region:</b> ${escapeHtml(mainCoordinates)}<br><b>Source:</b> ${escapeHtml(detail.source)} · Updated ${escapeHtml(detail.relativeUpdate || detail.lastUpdate || "time unavailable")}</div><h2>Affected region and map</h2><p>${detail.affectedAreaKm2 == null ? "Affected area size unavailable" : `${detail.affectedAreaKm2} km²`} · ${escapeHtml(detail.state || detail.countries.join(", "))}</p>${mapSection}<ul>${affectedZones || "<li>Boundary coordinates unavailable.</li>"}</ul><h2>Satellite image acquisitions</h2><p class="muted">Source image metadata supplied by Copernicus EMS. The source imagery and mapping products are available in the linked official archive.</p>${imageryContent}${imageSource}<h2>Cluster-to-hospital routes</h2><p class="muted">Road-network results from ${escapeHtml(routingProvider.toUpperCase())}. The Google Maps link in every route opens its own cluster origin and destination. Distances and ETAs may not reflect live traffic or closures.</p>${clusterContent || "<p>No cluster route data is currently available.</p>"}<div class="footer">Operational reference only. Verify current road conditions, hospital operations, and route safety before dispatch.</div><script>window.addEventListener("load",()=>setTimeout(()=>window.print(),250));</script></body></html>`;
-    reportWindow.document.open();
-    reportWindow.document.write(reportHtml);
-    reportWindow.document.close();
+      .imagery-table{width:100%;border-collapse:collapse;font-size:11px}.imagery-table th,.imagery-table td{border:1px solid #d4e2ef;padding:7px;text-align:left;vertical-align:top}.imagery-table th{background:#f5f9fd;color:#38516a}
+    </style></head><body><h1>Disaster response · cluster routing report</h1><div class="sub">Generated ${escapeHtml(new Date().toLocaleString())} · Incident ${escapeHtml(detail.code)} · ${escapeHtml(detail.mode === "live" ? "Live Copernicus EMS" : "Demo / historical")}</div><div class="box"><b>${escapeHtml(detail.name)}</b><br>${escapeHtml(detail.category)} · ${escapeHtml(detail.state || detail.countries.join(", "))}<p>${escapeHtml(shortDescription)}</p><b>Main affected region:</b> ${escapeHtml(mainCoordinates)}<br><b>Source:</b> ${escapeHtml(detail.source)} · Updated ${escapeHtml(detail.relativeUpdate || detail.lastUpdate || "time unavailable")}</div><h2>Affected region and map</h2><p>${detail.affectedAreaKm2 == null ? "Affected area size unavailable" : `${detail.affectedAreaKm2} km²`} · ${escapeHtml(detail.state || detail.countries.join(", "))}</p>${mapSection}<ul>${affectedZones || "<li>Boundary coordinates unavailable.</li>"}</ul><h2>Satellite image acquisitions</h2><p class="muted">Copernicus EMS supplies acquisition metadata here, not directly embeddable source-scene pixels. The map above is the Esri basemap with ResQMap overlays. Open the official analysis-product archive for source-provided mapping outputs.</p>${imageryContent}${imageSource}<h2>Cluster-to-hospital routes</h2><p class="muted">Road-network results from ${escapeHtml(routingProvider.toUpperCase())}. The Google Maps link in every route opens its own cluster origin and destination. Distances and ETAs may not reflect live traffic or closures.</p>${clusterContent || "<p>No cluster route data is currently available.</p>"}<div class="footer">Operational reference only. Verify current road conditions, hospital operations, and route safety before dispatch.</div><script>window.addEventListener("load",()=>setTimeout(()=>window.print(),250));</script></body></html>`;
+    const reportDocument = reportFrame.contentDocument;
+    const reportWindow = reportFrame.contentWindow;
+    if (!reportDocument || !reportWindow) {
+      cleanupReportFrame();
+      setReportError("The response report could not be opened for printing.");
+      return;
+    }
+
+    try {
+      reportWindow.addEventListener("afterprint", cleanupReportFrame, { once: true });
+      reportDocument.open();
+      reportDocument.write(reportHtml);
+      reportDocument.close();
+      reportWindow.focus();
+      reportWindow.print();
+    } catch (error) {
+      cleanupReportFrame();
+      console.error("Unable to print the response report", error);
+      setReportError("The response report could not be printed. Try again or check your browser's print settings.");
+    }
   }
 
   const impact = detail?.impact || {};
@@ -449,8 +501,28 @@ export default function App() {
           {loadError || notice}
         </div>
       )}
+      {hospitalDataNotice && (
+        <p className="mb-2 rounded-md border border-amber-400/20 bg-amber-400/5 px-2 py-1.5 text-[9px] text-amber-200">
+          Facility provenance: {hospitalDataNotice}
+        </p>
+      )}
 
-      <div className="grid min-h-0 flex-1 grid-cols-1 overflow-y-auto lg:grid-cols-[280px_minmax(0,1fr)_360px] lg:overflow-hidden">
+      <div className="grid shrink-0 grid-cols-2 gap-px border-b border-slate-800 bg-slate-800 sm:grid-cols-5">
+        {[
+          ["Active incidents", String(list.filter((item) => !item.closed).length)],
+          ["Affected clusters", String(clusterRoutes.length)],
+          ["Hospitals identified", String(new Set(clusterRoutes.flatMap((cluster) => cluster.hospitalRoutes.map((route) => route.hospital.id))).size)],
+          ["Validated routes", String(clusterRoutes.reduce((count, cluster) => count + cluster.hospitalRoutes.length, 0))],
+          ["Unresolved clusters", String(clusterRoutes.filter((cluster) => !cluster.hospitalRoutes.length).length)],
+        ].map(([label, value]) => (
+          <div key={label} className="bg-ink-900 px-3 py-2 sm:px-4">
+            <p className="text-[9px] font-medium uppercase tracking-wider text-slate-400">{label}</p>
+            <p className="mt-0.5 text-sm font-semibold tabular-nums text-slate-100">{value}</p>
+          </div>
+        ))}
+      </div>
+
+      <div className="grid min-h-0 flex-1 grid-cols-1 overflow-y-auto lg:grid-cols-[260px_minmax(0,1fr)_390px] lg:overflow-hidden">
         <aside className="dashboard-sidebar flex min-h-[330px] flex-col border-b lg:min-h-0 lg:border-b-0 lg:border-r">
           <div className="border-b border-slate-200 p-4">
             <div className="flex items-center justify-between">
@@ -458,16 +530,36 @@ export default function App() {
                 <h2 className="text-sm font-semibold text-slate-900">Incidents</h2>
                 <p className="mt-0.5 text-xs text-slate-500">{filtered.length} activations</p>
               </div>
+            </div>
+            <input
+              type="search"
+              aria-label="Search incidents"
+              placeholder="Search incidents…"
+              value={incidentQuery}
+              onChange={(event) => setIncidentQuery(event.target.value)}
+              className="mt-3 h-9 w-full rounded-md border border-slate-700 bg-ink-950 px-3 text-xs text-slate-100 placeholder:text-slate-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400"
+            />
+            <div className="mt-2 grid grid-cols-2 gap-2">
               <select
                 aria-label="Filter incidents by state or union territory"
                 value={stateFilter}
                 onChange={(event) => setStateFilter(event.target.value)}
-                className="h-9 max-w-[150px] rounded-md border border-slate-200 bg-white px-2 text-xs text-slate-700 shadow-sm outline-none focus-visible:ring-2 focus-visible:ring-sky-500"
+                className="h-8 min-w-0 rounded-md border border-slate-700 bg-ink-950 px-2 text-[10px] text-slate-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400"
               >
                 {states.map((state) => (
                   <option key={state} value={state}>
                     {state === "all" ? "All states & UTs" : state}
                   </option>
+                ))}
+              </select>
+              <select
+                aria-label="Filter incidents by severity"
+                value={severityFilter}
+                onChange={(event) => setSeverityFilter(event.target.value)}
+                className="h-8 min-w-0 rounded-md border border-slate-700 bg-ink-950 px-2 text-[10px] capitalize text-slate-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400"
+              >
+                {["all", "critical", "high", "moderate", "low"].map((severity) => (
+                  <option key={severity} value={severity}>{severity === "all" ? "All severity" : severity}</option>
                 ))}
               </select>
             </div>
@@ -492,8 +584,19 @@ export default function App() {
                     >
                       <div className="flex items-center justify-between gap-2">
                         <span className="font-mono text-[10px] text-slate-400">{item.code}</span>
-                        <span className={`rounded-full px-2 py-0.5 text-[9px] font-medium ${item.closed ? "bg-slate-100 text-slate-500" : "bg-emerald-50 text-emerald-700"}`}>
-                          {item.closed ? "Closed" : "Open"}
+                        <span className="flex items-center gap-1">
+                          <span className={`rounded-full px-2 py-0.5 text-[9px] font-semibold uppercase ${
+                            item.severity === "critical"
+                              ? "border border-rose-400/30 bg-rose-500/10 text-rose-300"
+                              : item.severity === "high"
+                                ? "border border-amber-400/30 bg-amber-500/10 text-amber-200"
+                                : "border border-cyan-400/20 bg-cyan-400/5 text-cyan-200"
+                          }`}>
+                            {item.severity}
+                          </span>
+                          <span className={`rounded-full px-2 py-0.5 text-[9px] font-medium ${item.closed ? "bg-slate-100 text-slate-500" : "bg-emerald-50 text-emerald-700"}`}>
+                            {item.closed ? "Closed" : "Open"}
+                          </span>
                         </span>
                       </div>
                       <div className="mt-1.5 text-[13px] font-medium leading-snug text-slate-900">{item.name}</div>
@@ -615,7 +718,7 @@ export default function App() {
               >
                 <div className="mb-2 flex items-center justify-between">
                   <p className="text-[10px] text-slate-500">
-                    {clusterRoutes.length} source-AOI clusters · cells up to 0.56 km²
+                    {clusterRoutes.length} AOI-sampled clusters · point radius {CLUSTER_CONFIG.radiusKm} km when observations are available
                   </p>
                   {clusterRoutesLoading && <span className="text-[10px] font-medium text-sky-700">Finding routes…</span>}
                 </div>
@@ -634,9 +737,17 @@ export default function App() {
                 )}
                 {routeMatrixError && (
                   <p className="mb-2 text-[10px] text-amber-300">
-                    Road-network ranking unavailable; geographic proximity is used. {routeMatrixError}
+                    Road matrix unavailable; only directly validated road routes are eligible. {routeMatrixError}
                   </p>
                 )}
+                <label className="mb-2 flex items-center gap-2 text-[10px] text-slate-400">
+                  <input
+                    type="checkbox"
+                    checked={routingDebug}
+                    onChange={(event) => setRoutingDebug(event.target.checked)}
+                  />
+                  Include candidate and rejected-route diagnostics
+                </label>
                 <div className="space-y-1.5">
                   {clusterRoutes.map((cluster) => (
                     <details
@@ -667,6 +778,14 @@ export default function App() {
                           {cluster.latitude.toFixed(5)}, {cluster.longitude.toFixed(5)}
                           {cluster.areaKm2 == null ? " · area geometry estimated/unavailable" : ` · ${cluster.areaKm2} km²`}
                         </p>
+                        <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[9px] text-slate-400">
+                          <span>Severity: <b className="capitalize text-slate-200">{cluster.severity || detail.severity}</b> ({cluster.severityBasis || detail.severityBasis || "basis unavailable"})</span>
+                          <span>Cluster population: <b className="text-slate-200">{formatNum(cluster.populationEstimate)}</b></span>
+                          <span className="col-span-2">{cluster.populationEstimateMethod}</span>
+                          {cluster.assignedHospitalId && (
+                            <span className="col-span-2">Proposed hospital: {cluster.hospitalRoutes.find((route) => route.hospital.id === cluster.assignedHospitalId)?.hospital.name || cluster.assignedHospitalId} · availability unknown</span>
+                          )}
+                        </div>
                         {cluster.hospitalRoutes.map((route) => (
                           <div key={route.id}>
                             <button
@@ -678,8 +797,8 @@ export default function App() {
                                 <span className="grid h-5 w-5 shrink-0 place-items-center rounded-full bg-sky-100 font-mono text-[9px] text-sky-800">{route.rank}</span>
                                 <span className="truncate">{route.rank === 1 ? "Recommended" : route.rank === 2 ? "Alternative" : "Additional"} · {route.hospital.name}</span>
                               </span>
-                              <span className={`shrink-0 text-[9px] ${route.routeStatus === "routed" ? "text-emerald-700" : "text-amber-700"}`}>
-                                {route.routeStatus === "routed" ? "ROUTED" : "UNAVAILABLE"}
+                              <span className={`shrink-0 text-[9px] ${route.routeStatus === "routed" ? "text-sky-300" : "text-amber-700"}`}>
+                                {route.routeStatus === "routed" ? "ROAD ROUTE" : "UNAVAILABLE"}
                               </span>
                             </div>
                             <div className="mt-1.5 flex items-center gap-2 font-mono text-[10px] text-slate-600">
@@ -687,6 +806,10 @@ export default function App() {
                               <span className="rounded-md bg-slate-100 px-1.5 py-0.5">{route.durationMin == null ? "— min" : `${route.durationMin} min`}</span>
                               <span className="text-[9px] text-slate-500">road network</span>
                             </div>
+                            <p className="mt-1 text-[9px] text-slate-400">
+                              Score {route.score?.toFixed(2) ?? "—"} · time {route.scoreBreakdown?.travelTime ?? "—"} · distance {route.scoreBreakdown?.roadDistance ?? "—"} · severity {route.scoreBreakdown?.severity ?? "—"} · access {route.scoreBreakdown?.roadAccessibility ?? "—"} · capability {route.scoreBreakdown?.emergencyCapability ?? "—"} · availability {route.scoreBreakdown?.availability ?? "—"}
+                            </p>
+                            <p className="mt-0.5 text-[9px] text-slate-400">{route.selectionReason}</p>
                             </button>
                             <a
                               href={googleMapsDirectionsUrl(cluster, route.hospital)}
@@ -699,7 +822,12 @@ export default function App() {
                           </div>
                         ))}
                         {!cluster.hospitalRoutes.length && (
-                          <p className="text-[10px] text-slate-500">No suitable hospitals found within 120 km.</p>
+                          <p className="text-[10px] text-rose-300">Unresolved: {cluster.routingFailure || "no validated road route to a candidate hospital"}. Do not dispatch using a straight-line estimate.</p>
+                        )}
+                        {routingDebug && cluster.debug && (
+                          <pre className="max-h-32 overflow-auto rounded-md border border-slate-700 bg-ink-950 p-2 text-[9px] text-slate-300">
+                            {JSON.stringify(cluster.debug, null, 2)}
+                          </pre>
                         )}
                       </div>
                     </details>
@@ -722,7 +850,9 @@ export default function App() {
                     <DetailRow label="Cluster coordinates" value={`${selectedRoute.cluster.latitude.toFixed(5)}, ${selectedRoute.cluster.longitude.toFixed(5)}`} />
                     <DetailRow label="Hospital" value={selectedRoute.route.hospital.name} />
                     <DetailRow label="Road route" value={selectedRoute.route.routeStatus === "routed" ? selectedRoute.route.routeSource : "Unavailable — no straight-line route substituted"} />
-                    <DetailRow label="Distance / ETA" value={`${selectedRoute.route.roadKm ?? "Unavailable"} km / ${selectedRoute.route.durationMin ?? "Unavailable"} min`} />
+                    <DetailRow label="Distance / ETA" value={`${selectedRoute.route.roadKm ?? "Unavailable"} km / ${selectedRoute.route.durationMin ?? "Unavailable"} min (estimated; no live traffic)`} />
+                    <DetailRow label="Hospital capacity" value="Unknown — no live capacity feed" />
+                    <DetailRow label="Road snap" value={`Origin ${selectedRoute.route.routeSnapDistanceKm?.origin ?? "—"} km · destination ${selectedRoute.route.routeSnapDistanceKm?.destination ?? "—"} km`} />
                     <a
                       href={googleMapsDirectionsUrl(selectedRoute.cluster, selectedRoute.route.hospital)}
                       target="_blank"
@@ -795,7 +925,7 @@ export default function App() {
                   className="flex w-full items-center justify-center gap-2 rounded-md bg-sky-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-2 disabled:cursor-wait disabled:opacity-55"
                 >
                   <FileText className="h-4 w-4" />
-                  {clusterRoutesLoading ? "Preparing cluster routes…" : "Export response report"}
+                  {clusterRoutesLoading ? "Preparing cluster routes…" : "Print / save response PDF"}
                 </button>
                 {reportError && <p role="status" className="mt-2 text-xs text-rose-700">{reportError}</p>}
               </div>

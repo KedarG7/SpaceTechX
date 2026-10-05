@@ -195,6 +195,11 @@ export function summarizeActivation(raw, { mode = "live" } = {}) {
     district: raw.district || null,
     centroid,
     severity: raw.severity || severityFrom(raw, impact || {}),
+    severityBasis: mode === "demo"
+      ? "demonstration-data"
+      : raw.severity
+        ? "source-reported"
+        : "inferred from activation status and reported impact statistics",
     closed: Boolean(raw.closed),
     mode,
     source: mode === "live" ? "Copernicus EMS Rapid Mapping" : raw.source,
@@ -234,6 +239,7 @@ export function hydrateDetail(raw, { mode = "live" } = {}) {
       version: p.version,
       images: (p.images || []).map((image) => ({
         uuid: image.uuid,
+        new: typeof image.new === "boolean" ? image.new : null,
         sensorType: image.sensorType,
         sensorName: image.sensorName,
         resolutionClass: image.resolutionClass,

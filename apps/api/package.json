@@ -4,9 +4,11 @@
   "type": "module",
   "scripts": {
     "dev": "node src/index.js",
-    "start": "node src/index.js"
+    "start": "node src/index.js",
+    "test": "node --experimental-strip-types --test test/*.test.js ../web/src/map/clusterZones.test.mjs ../web/src/services/responseReport.test.mjs"
   },
   "dependencies": {
+    "@turf/turf": "^7.4.0",
     "compression": "^1.8.0",
     "cors": "^2.8.5",
     "express": "^4.21.2",
