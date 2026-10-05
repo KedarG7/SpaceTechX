@@ -25,6 +25,45 @@ const SOUTH_ASIA = new Set([
   "afghanistan",
 ]);
 
+const INDIAN_STATES_AND_UTS = [
+  "Andaman and Nicobar Islands",
+  "Andhra Pradesh",
+  "Arunachal Pradesh",
+  "Assam",
+  "Bihar",
+  "Chandigarh",
+  "Chhattisgarh",
+  "Dadra and Nagar Haveli and Daman and Diu",
+  "Delhi",
+  "Goa",
+  "Gujarat",
+  "Haryana",
+  "Himachal Pradesh",
+  "Jammu and Kashmir",
+  "Jharkhand",
+  "Karnataka",
+  "Kerala",
+  "Ladakh",
+  "Lakshadweep",
+  "Madhya Pradesh",
+  "Maharashtra",
+  "Manipur",
+  "Meghalaya",
+  "Mizoram",
+  "Nagaland",
+  "Odisha",
+  "Puducherry",
+  "Punjab",
+  "Rajasthan",
+  "Sikkim",
+  "Tamil Nadu",
+  "Telangana",
+  "Tripura",
+  "Uttar Pradesh",
+  "Uttarakhand",
+  "West Bengal",
+];
+
 const cache = {
   list: { at: 0, data: null, error: null },
   details: new Map(),
@@ -61,32 +100,9 @@ function severityFrom(raw, impact) {
 function inferState(name, countries) {
   if (!matchesIndia(countries)) return null;
   const text = `${name}`.toLowerCase();
-  const states = [
-    "assam",
-    "maharashtra",
-    "kerala",
-    "odisha",
-    "uttarakhand",
-    "himachal pradesh",
-    "tamil nadu",
-    "bihar",
-    "west bengal",
-    "gujarat",
-    "delhi",
-    "karnataka",
-    "andhra pradesh",
-    "telangana",
-    "uttar pradesh",
-    "rajasthan",
-    "madhya pradesh",
-    "manipur",
-    "meghalaya",
-    "sikkim",
-    "goa",
-    "jammu and kashmir",
-    "punjab",
-  ];
-  return states.find((s) => text.includes(s)) || "India (state not specified in CEMS record)";
+  return INDIAN_STATES_AND_UTS.find((state) =>
+    new RegExp(`(?:^|[^a-z])${state.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:$|[^a-z])`).test(text)
+  ) || "India (state not specified in CEMS record)";
 }
 
 function aggregateImpact(activation) {
@@ -216,6 +232,14 @@ export function hydrateDetail(raw, { mode = "live" } = {}) {
       downloadPath: p.downloadPath,
       expectedDelivery: p.expectedDelivery,
       version: p.version,
+      images: (p.images || []).map((image) => ({
+        uuid: image.uuid,
+        sensorType: image.sensorType,
+        sensorName: image.sensorName,
+        resolutionClass: image.resolutionClass,
+        acquisitionTime: image.acquisitionTime,
+        fileName: image.fileName,
+      })),
     })),
   }));
 
@@ -227,6 +251,15 @@ export function hydrateDetail(raw, { mode = "live" } = {}) {
     layers: mode === "live" ? collectLayers(raw) : [],
     aws_bucket: raw.aws_bucket,
     productsPath: raw.productsPath,
+    imagery: aois.flatMap((aoi) =>
+      aoi.products.flatMap((product) =>
+        (product.images || []).map((image) => ({
+          aoiName: aoi.name,
+          productType: product.type,
+          ...image,
+        }))
+      )
+    ),
     dataConfidence: raw.dataConfidence || {
       disaster: "Copernicus EMS Rapid Mapping public API",
       area: "Copernicus EMS AOI / product extent (WKT)",
@@ -237,18 +270,25 @@ export function hydrateDetail(raw, { mode = "live" } = {}) {
 }
 
 async function fetchJson(url) {
-  const response = await fetch(url, {
-    headers: { Accept: "application/json" },
-  });
-  if (!response.ok) {
-    throw new Error(`Copernicus request failed (${response.status})`);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15_000);
+  try {
+    const response = await fetch(url, {
+      headers: { Accept: "application/json" },
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      throw new Error(`Copernicus request failed (${response.status})`);
+    }
+    return await response.json();
+  } finally {
+    clearTimeout(timeout);
   }
-  return response.json();
 }
 
-export async function getActivations() {
+export async function getActivations({ force = false } = {}) {
   const now = Date.now();
-  if (cache.list.data && now - cache.list.at < LIST_TTL) {
+  if (!force && cache.list.data && now - cache.list.at < LIST_TTL) {
     return cache.list.data;
   }
   try {
@@ -279,12 +319,13 @@ export async function getActivationDetail(code) {
   return raw;
 }
 
-export async function listDisasters({ mode = "india", country = "india" } = {}) {
+export async function listDisasters({ mode = "india", country = "india", refresh = false } = {}) {
   let live = [];
   let liveError = null;
   try {
-    const activations = await getActivations();
+    const activations = await getActivations({ force: refresh });
     live = activations.map((a) => summarizeActivation(a, { mode: "live" }));
+    liveError = cache.list.error;
   } catch (error) {
     liveError = error.message;
   }
@@ -313,8 +354,9 @@ export async function listDisasters({ mode = "india", country = "india" } = {}) 
     liveError,
     copernicusFetchedAt: cache.list.at ? new Date(cache.list.at).toISOString() : null,
     items,
-    notice:
-      liveIndia.length === 0
+    notice: liveError
+      ? "Copernicus EMS is temporarily unavailable. Showing cached data or the demonstration catalogue."
+      : liveIndia.length === 0
         ? "No live Copernicus Rapid Mapping activations currently list India. Dashboard is using the India historical/demo catalogue so the operations workflow remains demonstrable."
         : "Live Copernicus EMS activations for India are available and merged with the historical/demo catalogue.",
   };

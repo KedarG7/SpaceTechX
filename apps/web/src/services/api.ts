@@ -39,6 +39,17 @@ export type DisasterDetail = DisasterSummary & {
   extentGeoJSON?: GeoJSON.Geometry | null;
   layers?: Array<{ name: string; json?: string | null; thematic?: string }>;
   dataConfidence?: Record<string, string>;
+  productsPath?: string | null;
+  imagery?: Array<{
+    aoiName: string;
+    productType: string;
+    sensorName: string;
+    sensorType: string;
+    resolutionClass?: string;
+    acquisitionTime?: string;
+    fileName?: string;
+    uuid?: string;
+  }>;
 };
 
 export type Hospital = {
@@ -107,10 +118,11 @@ export type Facility = {
   longitude: number;
   distanceKm: number;
   source: string;
+  operationalStatus?: string;
 };
 
 export async function apiGet<T>(path: string): Promise<T> {
-  const res = await fetch(path);
+  const res = await fetch(path, { cache: "no-store" });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }

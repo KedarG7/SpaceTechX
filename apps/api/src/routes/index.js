@@ -40,7 +40,11 @@ api.get("/health", (_req, res) => {
 api.get("/disasters", async (req, res) => {
   try {
     const mode = req.query.mode || "india";
-    const payload = await listDisasters({ mode, country: req.query.country || "india" });
+    const payload = await listDisasters({
+      mode,
+      country: req.query.country || "india",
+      refresh: req.query.refresh === "1",
+    });
     recordAudit({ action: "list_disasters", detail: { mode, count: payload.items.length } });
     res.json(payload);
   } catch {
@@ -164,7 +168,7 @@ api.post("/disasters/:id/cluster-routes", async (req, res) => {
     if (
       !Array.isArray(clusters) ||
       clusters.length < 1 ||
-      clusters.length > 8 ||
+      clusters.length > 12 ||
       clusters.some(
         (cluster) =>
           typeof cluster?.id !== "string" ||
@@ -175,7 +179,7 @@ api.post("/disasters/:id/cluster-routes", async (req, res) => {
           typeof cluster.parentZoneId !== "string"
       )
     ) {
-      return res.status(400).json({ error: "Provide 1–8 affected-area clusters with valid coordinates and parent zones" });
+      return res.status(400).json({ error: "Provide 1–12 affected-area clusters with valid coordinates and parent zones" });
     }
 
     const candidatesByCluster = await Promise.all(
@@ -262,22 +266,32 @@ api.post("/disasters/:id/cluster-routes", async (req, res) => {
 
         const hospitalRoutes = await Promise.all(
           selected.map(async (candidate, index) => {
-            const route = await routeBetween(cluster, {
-              latitude: candidate.hospital.latitude,
-              longitude: candidate.hospital.longitude,
-            });
+            const route = index === 0
+              ? await routeBetween(cluster, {
+                  latitude: candidate.hospital.latitude,
+                  longitude: candidate.hospital.longitude,
+                })
+              : null;
+            const matrixHasRoadRoute = candidate.roadKm != null || candidate.durationMin != null;
+            const routeStatus = route?.status === "routed" || matrixHasRoadRoute
+              ? "routed"
+              : "unavailable";
             return {
               id: `${cluster.id}:${candidate.hospital.id}`,
               rank: index + 1,
               routeType: index === 0 ? "recommended" : "alternative",
               hospital: candidate.hospital,
-              roadKm: route.distanceKm ?? candidate.roadKm,
-              durationMin: route.durationMin ?? candidate.durationMin,
-              routeStatus: route.status,
-              routeConfidence: route.confidence,
-              routeSource: route.source,
-              routeGeometry: route.geometry,
-              routeDirections: route.directions || [],
+              roadKm: route?.distanceKm ?? candidate.roadKm,
+              durationMin: route?.durationMin ?? candidate.durationMin,
+              routeStatus,
+              routeConfidence: route?.confidence || (matrixHasRoadRoute ? "road-network" : "unavailable"),
+              routeSource: route?.status === "routed"
+                ? route.source
+                : matrixHasRoadRoute
+                  ? `${getRoutingConfig().provider} road-network matrix`
+                  : route?.source || "Road route unavailable",
+              routeGeometry: route?.geometry || null,
+              routeDirections: route?.directions || [],
               rankingBasis: candidate.durationMin != null || candidate.roadKm != null
                 ? "Road-network distance and travel time, with emergency capability; static directory bed count is only a tie-breaker."
                 : "Geographic distance and emergency capability only; road-network ranking is unavailable.",
@@ -308,8 +322,6 @@ api.post("/disasters/:id/cluster-routes", async (req, res) => {
         geometry: disaster.extentGeoJSON || null,
         areaKm2: disaster.affectedAreaKm2 ?? null,
       },
-      severity: disaster.severity,
-      confidenceScore: req.body?.confidenceScore ?? null,
       generatedAt: new Date().toISOString(),
       routingProvider: getRoutingConfig(),
       rankingBasis: hasRoadNetworkMetrics

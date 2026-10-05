@@ -13,6 +13,8 @@ const MAX_ROUTE_CANDIDATES = Number.isInteger(configuredCandidates)
   : 2;
 
 const cache = new Map();
+const pendingRoutes = new Map();
+const pendingMatrices = new Map();
 let requestStartChain = Promise.resolve();
 let nextRequestAt = 0;
 
@@ -156,14 +158,24 @@ export async function routeBetween(from, to) {
   const key = routeCacheKey(from, to);
   const cached = cacheGet(key);
   if (cached) return cached;
+  const pending = pendingRoutes.get(key);
+  if (pending) return pending;
+  const request = (async () => {
+    try {
+      const route = ROUTING_PROVIDER === "ors"
+        ? await requestOrsRoute(from, to)
+        : await requestOsrmRoute(from, to);
+      cacheSet(key, route);
+      return route;
+    } catch (error) {
+      return routeProviderUnavailable(error);
+    }
+  })();
+  pendingRoutes.set(key, request);
   try {
-    const route = ROUTING_PROVIDER === "ors"
-      ? await requestOrsRoute(from, to)
-      : await requestOsrmRoute(from, to);
-    cacheSet(key, route);
-    return route;
-  } catch (error) {
-    return routeProviderUnavailable(error);
+    return await request;
+  } finally {
+    pendingRoutes.delete(key);
   }
 }
 
@@ -176,45 +188,55 @@ export async function routeTable(origins, destinations) {
     .join(";")}`;
   const cached = cacheGet(key);
   if (cached) return cached;
-  try {
-    let data;
-    if (ROUTING_PROVIDER === "ors") {
-      if (!ORS_API_KEY) throw new Error("ORS_API_KEY is required when ROUTING_PROVIDER=ors");
-      const coordinates = [...origins, ...destinations].map(({ longitude, latitude }) => [longitude, latitude]);
-      const url = `${ORS_URL}/v2/matrix/driving-car`;
-      data = await scheduleRequest(url, {
-        method: "POST",
-        headers: { Authorization: ORS_API_KEY, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          locations: coordinates,
-          sources: origins.map((_origin, index) => index),
-          destinations: destinations.map((_destination, index) => origins.length + index),
-          metrics: ["distance", "duration"],
-        }),
-      });
+  const pending = pendingMatrices.get(key);
+  if (pending) return pending;
+  const request = (async () => {
+    try {
+      let data;
+      if (ROUTING_PROVIDER === "ors") {
+        if (!ORS_API_KEY) throw new Error("ORS_API_KEY is required when ROUTING_PROVIDER=ors");
+        const coordinates = [...origins, ...destinations].map(({ longitude, latitude }) => [longitude, latitude]);
+        const url = `${ORS_URL}/v2/matrix/driving-car`;
+        data = await scheduleRequest(url, {
+          method: "POST",
+          headers: { Authorization: ORS_API_KEY, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            locations: coordinates,
+            sources: origins.map((_origin, index) => index),
+            destinations: destinations.map((_destination, index) => origins.length + index),
+            metrics: ["distance", "duration"],
+          }),
+        });
+        if (!data.durations || !data.distances) throw new Error("No road matrix returned");
+        const matrix = { durations: data.durations, distances: data.distances };
+        cacheSet(key, matrix);
+        return matrix;
+      }
+
+      const coordinates = [...origins, ...destinations]
+        .map(({ longitude, latitude }) => `${longitude},${latitude}`)
+        .join(";");
+      const sources = origins.map((_origin, index) => index).join(";");
+      const destinationIndices = destinations.map((_destination, index) => origins.length + index).join(";");
+      const url = `${OSRM_URL}/table/v1/driving/${coordinates}?sources=${sources}&destinations=${destinationIndices}&annotations=duration,distance`;
+      data = await scheduleRequest(url);
       if (!data.durations || !data.distances) throw new Error("No road matrix returned");
       const matrix = { durations: data.durations, distances: data.distances };
       cacheSet(key, matrix);
       return matrix;
+    } catch (error) {
+      return {
+        durations: null,
+        distances: null,
+        error: error instanceof Error ? error.message : "Road-network ranking matrix unavailable",
+      };
     }
-
-    const coordinates = [...origins, ...destinations]
-      .map(({ longitude, latitude }) => `${longitude},${latitude}`)
-      .join(";");
-    const sources = origins.map((_origin, index) => index).join(";");
-    const destinationIndices = destinations.map((_destination, index) => origins.length + index).join(";");
-    const url = `${OSRM_URL}/table/v1/driving/${coordinates}?sources=${sources}&destinations=${destinationIndices}&annotations=duration,distance`;
-    data = await scheduleRequest(url);
-    if (!data.durations || !data.distances) throw new Error("No road matrix returned");
-    const matrix = { durations: data.durations, distances: data.distances };
-    cacheSet(key, matrix);
-    return matrix;
-  } catch (error) {
-    return {
-      durations: null,
-      distances: null,
-      error: error instanceof Error ? error.message : "Road-network ranking matrix unavailable",
-    };
+  })();
+  pendingMatrices.set(key, request);
+  try {
+    return await request;
+  } finally {
+    pendingMatrices.delete(key);
   }
 }
 

@@ -33,7 +33,7 @@ const FACILITY_COLOR: Record<string, string> = {
   ndrf: "#FF9933",
   relief_centre: "#a3e635",
   helipad: "#22d3ee",
-  water: "#38bdf8",
+  water: "#00cfff",
   power: "#facc15",
   government: "#c4b5fd",
 };
@@ -51,6 +51,8 @@ type Props = {
   onSelectCluster?: (id: string) => void;
   onSelectRoute?: (id: string) => void;
   onSelectZone?: (id: string) => void;
+  onSelectFacility?: (id: string) => void;
+  onSnapshotReady?: (getSnapshot: () => string | null) => void;
 };
 
 export default function DisasterMap({
@@ -66,12 +68,14 @@ export default function DisasterMap({
   onSelectCluster,
   onSelectRoute,
   onSelectZone,
+  onSelectFacility,
+  onSnapshotReady,
 }: Props) {
   const ref = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<Map | null>(null);
   const ready = useRef(false);
-  const handlers = useRef({ onSelectHospital, onSelectCluster, onSelectRoute, onSelectZone });
-  handlers.current = { onSelectHospital, onSelectCluster, onSelectRoute, onSelectZone };
+  const handlers = useRef({ onSelectHospital, onSelectCluster, onSelectRoute, onSelectZone, onSelectFacility });
+  handlers.current = { onSelectHospital, onSelectCluster, onSelectRoute, onSelectZone, onSelectFacility };
 
   useEffect(() => {
     if (!ref.current || mapRef.current) return;
@@ -80,7 +84,16 @@ export default function DisasterMap({
       style: STYLE,
       center: [82.8, 22.5],
       zoom: 4.4,
+      preserveDrawingBuffer: true,
       attributionControl: false,
+    });
+    onSnapshotReady?.(() => {
+      try {
+        return map.getCanvas().toDataURL("image/png");
+      } catch (error) {
+        console.warn("Unable to capture the map for the response report", error);
+        return null;
+      }
     });
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "bottom-right");
     map.addControl(
@@ -94,13 +107,13 @@ export default function DisasterMap({
         id: "aoi-fill",
         type: "fill",
         source: "aoi",
-        paint: { "fill-color": "#38bdf8", "fill-opacity": 0.14 },
+        paint: { "fill-color": "#00cfff", "fill-opacity": 0.035 },
       });
       map.addLayer({
         id: "aoi-line",
         type: "line",
         source: "aoi",
-        paint: { "line-color": "#7dd3fc", "line-width": 2, "line-opacity": 0.8, "line-dasharray": [2, 1] },
+        paint: { "line-color": "#52eaff", "line-width": 1.5, "line-opacity": 0.75, "line-dasharray": [2, 1] },
       });
       map.addSource("cluster-zones", { type: "geojson", data: emptyFc() });
       map.addLayer({
@@ -108,8 +121,8 @@ export default function DisasterMap({
         type: "fill",
         source: "cluster-zones",
         paint: {
-          "fill-color": ["case", ["get", "selected"], "#38bdf8", "#0ea5e9"],
-          "fill-opacity": ["case", ["get", "selected"], 0.24, 0.1],
+          "fill-color": ["case", ["get", "selected"], "#52eaff", "#00a9df"],
+          "fill-opacity": ["case", ["get", "selected"], 0.28, 0.14],
         },
       });
       map.addLayer({
@@ -117,7 +130,7 @@ export default function DisasterMap({
         type: "line",
         source: "cluster-zones",
         paint: {
-          "line-color": ["case", ["get", "selected"], "#e0f2fe", "#7dd3fc"],
+          "line-color": ["case", ["get", "selected"], "#b5fbff", "#52eaff"],
           "line-width": ["case", ["get", "selected"], 2.5, 1.4],
           "line-dasharray": [1.5, 1],
         },
@@ -140,9 +153,9 @@ export default function DisasterMap({
         source: "clusters",
         paint: {
           "circle-radius": 18,
-          "circle-color": "#38bdf8",
+          "circle-color": "#00cfff",
           "circle-opacity": 0.14,
-          "circle-stroke-color": "#7dd3fc",
+          "circle-stroke-color": "#52eaff",
           "circle-stroke-width": 1,
           "circle-stroke-opacity": 0.65,
         },
@@ -153,8 +166,8 @@ export default function DisasterMap({
         source: "clusters",
         paint: {
           "circle-radius": ["case", ["get", "selected"], 9, 7],
-          "circle-color": ["case", ["get", "selected"], "#e0f2fe", "#0ea5e9"],
-          "circle-stroke-color": "#e0f2fe",
+          "circle-color": ["case", ["get", "selected"], "#b5fbff", "#00cfff"],
+          "circle-stroke-color": "#b5fbff",
           "circle-stroke-width": 2,
         },
       });
@@ -225,12 +238,12 @@ export default function DisasterMap({
         const now = performance.now();
         if (now - lastPulse >= 80) {
           const pulse = (Math.sin(now / 1100) + 1) / 2;
-          map.setPaintProperty("aoi-fill", "fill-opacity", 0.09 + pulse * 0.08);
-          map.setPaintProperty("aoi-line", "line-opacity", 0.55 + pulse * 0.3);
+          map.setPaintProperty("aoi-fill", "fill-opacity", 0.02 + pulse * 0.025);
+          map.setPaintProperty("aoi-line", "line-opacity", 0.38 + pulse * 0.18);
           map.setPaintProperty(
             "cluster-zone-fill",
             "fill-opacity",
-            ["case", ["get", "selected"], 0.2 + pulse * 0.08, 0.06 + pulse * 0.05]
+            ["case", ["get", "selected"], 0.24 + pulse * 0.06, 0.1 + pulse * 0.035]
           );
           map.setPaintProperty("cluster-halo", "circle-radius", 12 + pulse * 5);
           map.setPaintProperty("cluster-halo", "circle-opacity", 0.08 + pulse * 0.08);
@@ -300,7 +313,23 @@ export default function DisasterMap({
           .setDOMContent(popupContent(String(f.properties?.name || "Hospital"), `${f.properties?.distance ?? "—"} km geographic`))
           .addTo(map);
       });
-      for (const layer of ["hospitals-circle", "cluster-core", "cluster-zone-fill", "aoi-fill", "aoi-line", "route-line"]) {
+      map.on("click", "facilities-circle", (e) => {
+        const feature = e.features?.[0];
+        if (!feature) return;
+        const properties = feature.properties || {};
+        const id = String(properties.id || "");
+        if (id) handlers.current.onSelectFacility?.(id);
+        new Popup({ closeButton: false })
+          .setLngLat(e.lngLat)
+          .setDOMContent(
+            popupContent(
+              String(properties.name || "Response resource"),
+              `${String(properties.type || "Facility").replaceAll("_", " ")} · ${properties.district || "District unavailable"}, ${properties.state || "State unavailable"} · ${properties.distanceKm ?? "—"} km · ${properties.operationalStatus || "Status unavailable"}`
+            )
+          )
+          .addTo(map);
+      });
+      for (const layer of ["hospitals-circle", "facilities-circle", "cluster-core", "cluster-zone-fill", "aoi-fill", "aoi-line", "route-line"]) {
         map.on("mouseenter", layer, () => {
           map.getCanvas().style.cursor = "pointer";
         });
@@ -311,6 +340,7 @@ export default function DisasterMap({
     });
     mapRef.current = map;
     return () => {
+      onSnapshotReady?.(() => null);
       map.remove();
       mapRef.current = null;
       ready.current = false;
@@ -425,12 +455,22 @@ export default function DisasterMap({
         .filter((f) => layers[f.type] !== false && layers.infrastructure)
         .map((f) => ({
           type: "Feature" as const,
-          properties: { name: f.name, type: f.type, color: FACILITY_COLOR[f.type] || "#94a3b8" },
+          properties: {
+            id: f.id,
+            name: f.name,
+            type: f.type,
+            state: f.state,
+            district: f.district,
+            distanceKm: f.distanceKm,
+            source: f.source,
+            operationalStatus: f.operationalStatus || "Unknown",
+            color: FACILITY_COLOR[f.type] || "#94a3b8",
+          },
           geometry: { type: "Point", coordinates: [f.longitude, f.latitude] },
         })),
     });
 
-    const clusterColors = ["#38bdf8", "#a78bfa", "#2dd4bf", "#fb7185", "#60a5fa", "#f97316"];
+    const clusterColors = ["#00e5ff", "#36f3e4", "#17baff", "#72f7ff", "#00cfff", "#64eaff"];
     const routeFeatures = layers.routes
       ? clusterRoutes.flatMap((cluster, clusterIndex) =>
           cluster.hospitalRoutes.flatMap((route) =>

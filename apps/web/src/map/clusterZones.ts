@@ -14,6 +14,9 @@ import {
 } from "@turf/turf";
 import type { Feature, MultiPolygon, Polygon } from "geojson";
 
+const CLUSTER_CELL_SIZE_KM = 0.75;
+const TARGET_AREA_PER_CLUSTER_KM2 = 50;
+
 export type ParentZone = {
   id: string;
   name: string;
@@ -34,7 +37,15 @@ export type AffectedCluster = {
 type PolygonFeature = Feature<Polygon | MultiPolygon>;
 type ClusterCandidate = {
   parentZone: ParentZone;
+  componentId: string;
   feature: PolygonFeature;
+  representative: Feature<GeoJSON.Point>;
+  areaKm2: number;
+};
+
+type AoiComponent = {
+  id: string;
+  parentZone: ParentZone;
   representative: Feature<GeoJSON.Point>;
   areaKm2: number;
 };
@@ -55,32 +66,37 @@ function getRepresentative(feature: PolygonFeature): Feature<GeoJSON.Point> {
 export function buildAffectedClusters(
   parentZones: ParentZone[],
   fallback?: { latitude: number; longitude: number } | null,
-  maxClusters = 6
+  maxClusters = 12
 ): AffectedCluster[] {
   const candidates: ClusterCandidate[] = [];
+  const components: AoiComponent[] = [];
 
   for (const parentZone of parentZones) {
     if (!parentZone.geometry) continue;
-    for (const parentPolygon of toPolygonFeatures(parentZone.geometry)) {
+    for (const [componentIndex, parentPolygon] of toPolygonFeatures(parentZone.geometry).entries()) {
       if (!booleanValid(parentPolygon)) continue;
+      const componentId = `${parentZone.id}:${componentIndex}`;
+      const componentAreaKm2 = area(parentPolygon) / 1_000_000;
+      const component: AoiComponent = {
+        id: componentId,
+        parentZone,
+        representative: getRepresentative(parentPolygon),
+        areaKm2: componentAreaKm2,
+      };
+      components.push(component);
+
       const bounds = bbox(parentPolygon);
-      const westEast = distance(point([bounds[0], bounds[1]]), point([bounds[2], bounds[1]]), {
-        units: "kilometers",
-      });
-      const southNorth = distance(point([bounds[0], bounds[1]]), point([bounds[0], bounds[3]]), {
-        units: "kilometers",
-      });
-      const cellSideKm = Math.max(0.5, Math.max(westEast, southNorth) / 4);
-      const cells = squareGrid(bounds, cellSideKm, { units: "kilometers" });
+      const cells = squareGrid(bounds, CLUSTER_CELL_SIZE_KM, { units: "kilometers" });
 
       for (const cell of cells.features) {
         const child = intersect(featureCollection([cell, parentPolygon]));
         if (!child) continue;
         const childAreaKm2 = area(child) / 1_000_000;
-        if (childAreaKm2 < 0.05) continue;
+        if (childAreaKm2 < 0.02) continue;
         const feature = child as PolygonFeature;
         candidates.push({
           parentZone,
+          componentId,
           feature,
           representative: getRepresentative(feature),
           areaKm2: childAreaKm2,
@@ -103,28 +119,44 @@ export function buildAffectedClusters(
     }];
   }
 
+  const componentIdsWithCandidates = new Set(candidates.map((candidate) => candidate.componentId));
+  const routableComponents = components
+    .filter((component) => componentIdsWithCandidates.has(component.id))
+    .sort((a, b) => b.areaKm2 - a.areaKm2);
+  const totalAreaKm2 = routableComponents.reduce((total, component) => total + component.areaKm2, 0);
+  const desiredCount = Math.min(
+    maxClusters,
+    Math.max(
+      routableComponents.length,
+      Math.ceil(totalAreaKm2 / TARGET_AREA_PER_CLUSTER_KM2),
+      1
+    )
+  );
+
   const selected: ClusterCandidate[] = [];
-  const zonesWithCandidates = Array.from(new Set(candidates.map((candidate) => candidate.parentZone.id)));
-  for (const zoneId of zonesWithCandidates.slice(0, maxClusters)) {
-    const zoneCandidates = candidates.filter((candidate) => candidate.parentZone.id === zoneId);
-    const largest = zoneCandidates.reduce((best, candidate) =>
-      candidate.areaKm2 > best.areaKm2 ? candidate : best
+  for (const component of routableComponents.slice(0, desiredCount)) {
+    const componentCandidates = candidates.filter((candidate) => candidate.componentId === component.id);
+    const nearestCenterCell = componentCandidates.reduce((best, candidate) =>
+      distance(candidate.representative, component.representative, { units: "kilometers" }) <
+      distance(best.representative, component.representative, { units: "kilometers" })
+        ? candidate
+        : best
     );
-    selected.push(largest);
+    selected.push(nearestCenterCell);
   }
 
-  while (selected.length < Math.min(maxClusters, candidates.length)) {
+  while (selected.length < Math.min(desiredCount, candidates.length)) {
     const remaining = candidates.filter((candidate) => !selected.includes(candidate));
     if (!remaining.length) break;
     const next = remaining.reduce((best, candidate) => {
-      const nearestDistance = (item: ClusterCandidate) =>
-        Math.min(
-          ...selected.map((chosen) =>
-            distance(item.representative, chosen.representative, { units: "kilometers" })
-          )
-        );
-      if (!selected.length) return candidate.areaKm2 > best.areaKm2 ? candidate : best;
-      return nearestDistance(candidate) > nearestDistance(best) ? candidate : best;
+      const nearestDistance = (item: ClusterCandidate) => Math.min(
+        ...selected.map((chosen) =>
+          distance(item.representative, chosen.representative, { units: "kilometers" })
+        )
+      );
+      const score = (item: ClusterCandidate) =>
+        nearestDistance(item) + Math.min(item.areaKm2, CLUSTER_CELL_SIZE_KM ** 2) * 0.1;
+      return score(candidate) > score(best) ? candidate : best;
     });
     selected.push(next);
   }
