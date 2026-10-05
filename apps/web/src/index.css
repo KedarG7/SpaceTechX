@@ -1,0 +1,143 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  color: #eaf4ff;
+  background:
+    radial-gradient(ellipse at 50% -20%, rgba(24, 95, 164, 0.23), transparent 48%),
+    linear-gradient(140deg, #071426 0%, #08101f 48%, #0b1930 100%);
+  font-family: "IBM Plex Sans", system-ui, sans-serif;
+}
+
+button,
+select,
+input {
+  font: inherit;
+}
+
+button,
+summary,
+select {
+  -webkit-tap-highlight-color: transparent;
+}
+
+.dashboard-shell {
+  background:
+    radial-gradient(ellipse at 50% -28%, rgba(25, 107, 185, 0.12), transparent 54%),
+    rgba(5, 13, 26, 0.32);
+}
+
+.dashboard-sidebar {
+  background: rgba(7, 20, 39, 0.76);
+  backdrop-filter: blur(22px);
+  -webkit-backdrop-filter: blur(22px);
+}
+
+.glass-panel {
+  border-color: rgba(148, 199, 255, 0.2) !important;
+  background: rgba(9, 26, 48, 0.78) !important;
+  box-shadow: 0 16px 48px rgba(1, 8, 20, 0.34), inset 0 1px 0 rgba(255, 255, 255, 0.035);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+}
+
+.route-card {
+  border-color: rgba(140, 190, 244, 0.16);
+  background: linear-gradient(135deg, rgba(13, 39, 69, 0.88), rgba(8, 23, 43, 0.78));
+  transition: border-color 180ms ease, background-color 180ms ease, transform 180ms ease, box-shadow 180ms ease;
+}
+
+.route-card:hover {
+  transform: translateY(-1px);
+  border-color: rgba(96, 165, 250, 0.48);
+}
+
+details > summary {
+  transition: color 160ms ease;
+}
+
+details > summary:hover {
+  color: #f4f9ff;
+}
+
+details[open] > [data-collapsible-content] {
+  animation: reveal-panel 180ms ease-out both;
+}
+
+@keyframes reveal-panel {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+.maplibregl-popup-content {
+  background: #101826 !important;
+  color: #e2e8f0 !important;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 10px !important;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+  padding: 10px 12px !important;
+  font-family: "IBM Plex Sans", sans-serif;
+}
+
+.maplibregl-popup-anchor-bottom .maplibregl-popup-tip {
+  border-top-color: #101826 !important;
+}
+
+.maplibregl-ctrl-group {
+  background: #162033 !important;
+  border: 1px solid rgba(148, 163, 184, 0.2) !important;
+}
+
+.maplibregl-ctrl-group button {
+  filter: invert(1);
+}
+
+details[open] .map-layer-chevron {
+  transform: rotate(180deg);
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: #334155;
+  border-radius: 99px;
+}
+
+.pulse-dot {
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  background: #ef4444;
+  box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7);
+  animation: pulse 1.8s infinite;
+}
+
+@keyframes pulse {
+  70% {
+    box-shadow: 0 0 0 12px rgba(239, 68, 68, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0);
+  }
+}

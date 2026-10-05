@@ -1,0 +1,19 @@
+{
+  "name": "ndrf-disaster-intelligence",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Geospatial disaster-response intelligence platform for Indian emergency operations",
+  "workspaces": [
+    "apps/api",
+    "apps/web"
+  ],
+  "scripts": {
+    "dev": "concurrently -n api,web -c cyan,magenta \"npm run dev -w api\" \"npm run dev -w web\"",
+    "dev:api": "npm run dev -w api",
+    "dev:web": "npm run dev -w web",
+    "start": "npm run start -w api"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}
