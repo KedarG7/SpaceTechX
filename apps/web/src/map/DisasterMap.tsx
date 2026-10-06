@@ -51,6 +51,14 @@ const FACILITY_COLOR: Record<string, string> = {
   government: "#c4b5fd",
 };
 
+function hospitalAvailabilityStatus(hospital: Hospital) {
+  const status = `${hospital.operationalStatus || ""} ${hospital.bedsAvailability || ""}`.toLowerCase();
+  if (/high load|overload|critical|full/.test(status)) return "high load";
+  if (/limited|low capacity/.test(status)) return "limited capacity";
+  if (/available|operational/.test(status)) return "available";
+  return "availability unknown";
+}
+
 type Props = {
   disaster?: DisasterDetail | null;
   hospitals: Hospital[];
@@ -218,9 +226,14 @@ export default function DisasterMap({
         source: "hospitals",
         paint: {
           "circle-radius": ["case", ["get", "selected"], 10, ["get", "clusterSelected"], 8, 6],
-          "circle-color": ["case", ["get", "selected"], "#ffffff", ["get", "clusterSelected"], "#52eaff", "#00cfff"],
+          "circle-color": [
+            "case",
+            ["get", "selected"], "#ffffff",
+            ["get", "clusterSelected"], "#52eaff",
+            ["match", ["get", "availabilityStatus"], "available", "#38d5a2", "limited capacity", "#ffb020", "high load", "#ff526f", "#00cfff"],
+          ],
           "circle-stroke-width": 2,
-          "circle-stroke-color": "#042f2e",
+          "circle-stroke-color": ["match", ["get", "availabilityStatus"], "available", "#07583f", "limited capacity", "#8a5a0b", "high load", "#892b42", "#042f2e"],
         },
       });
       map.addLayer({
@@ -340,7 +353,7 @@ export default function DisasterMap({
           hospitalPopup.setDOMContent(
             popupContent(
               String(hospital.name || "Hospital directory entry"),
-              `${hospital.operationalStatus || "Operational status unknown"} · ${hospital.distance ?? "—"} km geographic distance`
+              `${hospital.availabilityStatus || "availability unknown"} · ${hospital.distance ?? "—"} km geographic distance`
             )
           );
         }
@@ -495,6 +508,7 @@ export default function DisasterMap({
               name: hospital.name,
               distance: hospital.distanceKm,
               operationalStatus: hospital.operationalStatus || "Unknown",
+              availabilityStatus: hospitalAvailabilityStatus(hospital),
               selected: hospital.id === selectedHospitalId,
               clusterSelected: clusterId === selectedClusterId,
               routeId,

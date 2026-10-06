@@ -170,17 +170,33 @@ export type Facility = {
 };
 
 export async function apiGet<T>(path: string): Promise<T> {
-  const res = await fetch(path, { cache: "no-store" });
-  if (!res.ok) throw new Error(await res.text());
+  const res = await fetch(path, { cache: "no-store", credentials: "same-origin" });
+  if (!res.ok) throw await responseError(res);
   return res.json();
 }
 
 export async function apiPost<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(path, {
     method: "POST",
+    credentials: "same-origin",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw await responseError(res);
   return res.json();
+}
+
+async function responseError(response: Response) {
+  let payload: { error?: string; sessionExpired?: boolean } = {};
+  try {
+    payload = await response.json();
+  } catch {
+    // Keep a small generic error when a response is not JSON.
+  }
+  if (response.status === 401) {
+    window.dispatchEvent(new CustomEvent("ndrf:session-expired", {
+      detail: { sessionExpired: payload.sessionExpired === true },
+    }));
+  }
+  return new Error(payload.error || `Request failed (${response.status}).`);
 }

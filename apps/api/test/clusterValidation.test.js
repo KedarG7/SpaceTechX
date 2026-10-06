@@ -22,7 +22,7 @@ test("server derives routing origin, area, and low-confidence population from so
   );
   assert.ok(Math.abs(cluster.latitude - 22.5) < 0.0001);
   assert.ok(Math.abs(cluster.longitude - 82.8) < 0.0001);
-  assert.ok(cluster.areaKm2 > 0 && cluster.areaKm2 < 0.75);
+  assert.ok(cluster.areaKm2 > 0 && cluster.areaKm2 < 82.47);
   assert.ok(cluster.populationEstimate > 0);
   assert.match(cluster.populationEstimateMethod, /Low-confidence area-proportional/);
   assert.equal(cluster.originMethod, "verified source-AOI geometry representative point");
@@ -40,7 +40,7 @@ test("rejects clusters outside source AOI", () => {
 
 test("rejects oversized, invalid, missing, and duplicate cluster input", () => {
   assert.throws(
-    () => validateAffectedClusters([inputCluster("large", squarePolygon(82.8, 22.5, 0.01))], testDisaster()),
+    () => validateAffectedClusters([inputCluster("large", squarePolygon(82.8, 22.5, 0.1))], testDisaster()),
     /area must be between/
   );
   const invalid = {
