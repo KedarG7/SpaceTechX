@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Activity, Clock3, LogOut, RefreshCw, ShieldCheck } from "lucide-react";
+import logoUrl from "../../images/ResQmap-logo-mono-black.svg";
 
 type Props = {
   clock: string;
@@ -39,7 +40,7 @@ export default function TopBar({
   return (
     <header className="topbar relative z-20 flex min-h-14 flex-nowrap items-center justify-between gap-2 border-b px-3 py-2 sm:px-5">
       <div className="flex min-w-0 flex-1 items-center gap-2.5">
-        <div aria-hidden="true" className="ndrf-mark">N</div>
+        <img src={logoUrl} alt="ResQmap Logo" className="h-8 w-auto ndrf-mark-replaced" />
         <div className="min-w-0 leading-tight">
           <h1 className="truncate text-[10px] font-semibold tracking-[0.06em] text-slate-100 sm:text-xs sm:tracking-[0.1em]">NDRF · DISASTER RESPONSE COMMAND CENTER</h1>
           <p className="hidden items-center gap-1.5 pt-0.5 text-[9px] uppercase tracking-[0.12em] text-slate-500 xl:flex">

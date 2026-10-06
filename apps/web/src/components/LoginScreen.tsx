@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { ArrowRight, Eye, EyeOff, LockKeyhole, ShieldCheck } from "lucide-react";
+import logoUrl from "../../images/ResQmap-logo-mono-black.svg";
 
 type Props = {
   onAuthenticated: (email: string) => void;
@@ -65,7 +66,7 @@ export default function LoginScreen({ onAuthenticated, notice }: Props) {
       <div className="login-grid" aria-hidden="true" />
       <div className="login-topline relative mx-auto flex max-w-6xl items-center justify-between gap-4">
         <div className="flex items-center gap-3">
-          <div className="login-mark" aria-hidden="true">N</div>
+          <img src={logoUrl} alt="ResQmap Logo" className="h-10 w-auto" />
           <div>
             <p className="font-mono text-sm font-semibold tracking-[0.2em] text-white">NDRF</p>
             <p className="hidden text-[9px] font-medium uppercase tracking-[0.18em] text-slate-400 sm:block">
