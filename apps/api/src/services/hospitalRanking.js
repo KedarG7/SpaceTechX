@@ -120,6 +120,25 @@ export function assignDistinctRecommendations(clusters) {
   return assignments;
 }
 
+export function rankNearestRoadCandidates(candidates) {
+  return [...candidates]
+    .filter((candidate) =>
+      Number.isFinite(candidate.roadKm) && candidate.roadKm > 0 &&
+      Number.isFinite(candidate.durationMin) && candidate.durationMin > 0
+    )
+    .sort((left, right) =>
+      left.roadKm - right.roadKm ||
+      left.durationMin - right.durationMin ||
+      (left.geographicKm ?? Infinity) - (right.geographicKm ?? Infinity)
+    );
+}
+
+export function rankNearestRoutedCandidates(candidates) {
+  return rankNearestRoadCandidates(candidates.filter(
+    (candidate) => candidate.routeGeometry?.type === "LineString"
+  ));
+}
+
 export function routeScoringWeights() {
   return configuredWeights();
 }

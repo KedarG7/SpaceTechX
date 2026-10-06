@@ -11,11 +11,13 @@ import {
   MapPinned,
   Route,
   Siren,
+  ShieldCheck,
   Users,
 } from "lucide-react";
 import DisasterMap from "./map/DisasterMap";
 import { buildAffectedClusters, type ClusterConfig } from "./map/clusterZones";
 import TopBar from "./components/TopBar";
+import LoginScreen from "./components/LoginScreen";
 import {
   apiGet,
   apiPost,
@@ -57,7 +59,7 @@ const LAYER_DEFAULTS: Record<string, boolean> = {
 };
 
 const CLUSTER_CONFIG: ClusterConfig = {
-  radiusKm: Number(import.meta.env.VITE_CLUSTER_RADIUS_KM) || 0.75,
+  radiusKm: Number(import.meta.env.VITE_CLUSTER_RADIUS_KM) || 5,
   minimumAffectedPoints: Number(import.meta.env.VITE_CLUSTER_MIN_AFFECTED_POINTS) || 3,
   maxClusters: Math.min(12, Math.max(1, Number(import.meta.env.VITE_MAX_CLUSTERS) || 12)),
 };
@@ -65,6 +67,14 @@ const CLUSTER_CONFIG: ClusterConfig = {
 function formatNum(n?: number | null) {
   if (n == null || Number.isNaN(n)) return "Unknown";
   return new Intl.NumberFormat("en-IN").format(n);
+}
+
+function hospitalAvailabilityStatus(hospital: Hospital) {
+  const status = `${hospital.operationalStatus || ""} ${hospital.bedsAvailability || ""}`.toLowerCase();
+  if (/high load|overload|critical|full/.test(status)) return "high load";
+  if (/limited|low capacity/.test(status)) return "limited capacity";
+  if (/available|operational/.test(status)) return "available";
+  return "availability unknown";
 }
 
 function escapeHtml(value: string) {
@@ -126,7 +136,95 @@ function geometryBounds(geometry: GeoJSON.Geometry | null | undefined) {
   );
 }
 
+type AuthenticatedOperator = { email: string };
+
 export default function App() {
+  const [authChecked, setAuthChecked] = useState(false);
+  const [operator, setOperator] = useState<AuthenticatedOperator | null>(null);
+  const [authNotice, setAuthNotice] = useState<string | null>(null);
+  const [path, setPath] = useState(window.location.pathname);
+
+  function navigate(nextPath: string, replace = false) {
+    if (replace) window.history.replaceState({}, "", nextPath);
+    else window.history.pushState({}, "", nextPath);
+    setPath(nextPath);
+  }
+
+  useEffect(() => {
+    const onPopState = () => setPath(window.location.pathname);
+    window.addEventListener("popstate", onPopState);
+    let active = true;
+    fetch("/api/auth/me", { credentials: "same-origin", cache: "no-store" })
+      .then(async (response) => {
+        const result = await response.json().catch(() => ({}));
+        if (!active) return;
+        if (response.ok && result?.authenticated === true && typeof result?.user?.email === "string") {
+          setOperator({ email: result.user.email });
+        } else if (result?.sessionExpired === true) {
+          setAuthNotice("Your secure session has expired. Please authenticate again.");
+        } else if (response.status >= 500) {
+          setAuthNotice("Authentication service unavailable. Please try again.");
+        }
+        setAuthChecked(true);
+      })
+      .catch(() => {
+        if (!active) return;
+        setAuthNotice("Authentication service unavailable. Please try again.");
+        setAuthChecked(true);
+      });
+    const onSessionExpired = (event: Event) => {
+      const detail = (event as CustomEvent<{ sessionExpired?: boolean }>).detail;
+      setOperator(null);
+      setAuthNotice(detail?.sessionExpired
+        ? "Your secure session has expired. Please authenticate again."
+        : "Your secure session is no longer active. Please authenticate again.");
+      setAuthChecked(true);
+    };
+    window.addEventListener("ndrf:session-expired", onSessionExpired);
+    return () => {
+      active = false;
+      window.removeEventListener("popstate", onPopState);
+      window.removeEventListener("ndrf:session-expired", onSessionExpired);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!authChecked) return;
+    if (operator && path !== "/command-center") navigate("/command-center", true);
+    else if (!operator && path !== "/login") navigate("/login", true);
+  }, [authChecked, operator, path]);
+
+  async function logout() {
+    const response = await fetch("/api/auth/logout", {
+      method: "POST",
+      credentials: "same-origin",
+      cache: "no-store",
+    });
+    if (!response.ok) throw new Error("Logout failed");
+    setOperator(null);
+    setAuthNotice(null);
+    navigate("/login", true);
+  }
+
+  if (!authChecked) {
+    return <main className="auth-check"><span className="login-spinner" /> Verifying secure session…</main>;
+  }
+  if (!operator) {
+    return <LoginScreen notice={authNotice} onAuthenticated={(email) => {
+      setOperator({ email });
+      setAuthNotice(null);
+    }} />;
+  }
+  return <Dashboard operatorEmail={operator.email} onLogout={logout} />;
+}
+
+function Dashboard({
+  operatorEmail,
+  onLogout,
+}: {
+  operatorEmail: string;
+  onLogout: () => Promise<void>;
+}) {
   const [clock, setClock] = useState("");
   const [mode, setMode] = useState("india");
   const [list, setList] = useState<DisasterSummary[]>([]);
@@ -386,12 +484,9 @@ export default function App() {
     const clusterContent = clusterRoutes.map((cluster) => {
       const routeContent = cluster.hospitalRoutes.map((route) => {
         const mapsUrl = googleMapsDirectionsUrl(cluster, route.hospital);
-        const steps = route.routeDirections?.length
-          ? `<ol>${route.routeDirections.map((step) => `<li>${escapeHtml(step.instruction)}${step.distanceKm == null ? "" : ` · ${step.distanceKm} km`}${step.durationMin == null ? "" : ` · ${step.durationMin} min`}</li>`).join("")}</ol>`
-          : `<p class="muted">${route.routeStatus === "routed" ? "Turn-by-turn directions were not provided by the routing service." : "Road route and directions unavailable."}</p>`;
-        return `<article class="route"><h4>${route.rank === 1 ? "Proposed recommended route" : `Validated alternative ${route.rank}`} · ${escapeHtml(route.hospital.name)}</h4><p><b>Road distance:</b> ${route.roadKm == null ? "Unavailable" : `${route.roadKm} km`} · <b>Estimated road-network ETA (no live traffic):</b> ${route.durationMin == null ? "Unavailable" : `${route.durationMin} min`} · <b>Route status:</b> ${escapeHtml(route.routeStatus)} · <b>Score:</b> ${route.score?.toFixed(2) ?? "Unavailable"}</p><p><b>Cluster origin:</b> ${cluster.latitude.toFixed(5)}, ${cluster.longitude.toFixed(5)} · <b>Hospital:</b> ${route.hospital.latitude.toFixed(5)}, ${route.hospital.longitude.toFixed(5)}</p><p><b>Score contributions:</b> ${escapeHtml(JSON.stringify(route.scoreBreakdown || {}))}</p><p class="muted">${escapeHtml(route.selectionReason)}</p><p><a href="${escapeHtml(mapsUrl)}">Open this cluster-to-hospital route in Google Maps</a></p><h5>Road directions</h5>${steps}</article>`;
+        return `<article class="route"><h4>${route.rank === 1 ? "Recommended hospital" : `Nearby alternative ${route.rank}`} · ${escapeHtml(route.hospital.name)}</h4><div class="route-metrics"><span><b>${route.roadKm == null ? "Unavailable" : `${route.roadKm} km`}</b><small>Road distance</small></span><span><b>${route.durationMin == null ? "Unavailable" : `${route.durationMin} min`}</b><small>Estimated ETA</small></span><span><b>${escapeHtml(route.routeStatus)}</b><small>Route status</small></span></div><p class="muted">Capacity and live availability are not supplied. ETA excludes live traffic.</p><p><a href="${escapeHtml(mapsUrl)}">Open route in Google Maps</a></p></article>`;
       }).join("");
-      return `<section><h3>${escapeHtml(cluster.name)} <span class="muted">· ${escapeHtml(cluster.id)}</span></h3><p><b>Parent affected zone:</b> ${escapeHtml(cluster.parentZoneName)} (${escapeHtml(cluster.parentZoneId)}) · <b>Cluster coordinates:</b> ${cluster.latitude.toFixed(5)}, ${cluster.longitude.toFixed(5)} (latitude, longitude) · <b>Severity:</b> ${escapeHtml(cluster.severity || detail.severity)} · <b>Area:</b> ${cluster.areaKm2 ?? "Unavailable"} km² · <b>Population (coarse estimate):</b> ${cluster.populationEstimate ?? "Unavailable"}</p><p class="muted">${escapeHtml(cluster.populationEstimateMethod || "No cluster-level population surface is available.")}</p>${routeContent || '<p class="muted">Unresolved: no validated road routes are available for this cluster.</p>'}</section>`;
+      return `<section class="cluster"><div class="cluster-heading"><h3>${escapeHtml(cluster.name)} <span class="muted">· ${escapeHtml(cluster.id)}</span></h3><span class="severity">${escapeHtml(cluster.severity || detail.severity)}</span></div><p class="muted">${escapeHtml(cluster.parentZoneName)} · ${cluster.latitude.toFixed(5)}, ${cluster.longitude.toFixed(5)} · ${cluster.areaKm2 == null ? "Area unavailable" : `${cluster.areaKm2} km²`}</p>${routeContent || '<p class="muted">No validated road route is available for this cluster.</p>'}</section>`;
     }).join("");
     const imageryContent = buildImageryReportTable(detail.imagery);
     const productArchive = safeHttpsUrl(detail.productsPath);
@@ -402,10 +497,25 @@ export default function App() {
       ? `<figure><img class="map-image" src="${mapSnapshot}" alt="Satellite basemap with affected clusters and hospital routes"><figcaption>Esri satellite basemap with the incident, cluster, facility, and route overlays. This is not the Copernicus source acquisition imagery.</figcaption></figure>`
       : `<p class="muted">Map snapshot could not be captured in this browser. Use the Google Maps route links below for navigation.</p>`;
     const shortDescription = (detail.reason || "No short incident summary supplied by the source.").slice(0, 360);
-    const reportHtml = `<!doctype html><html><head><meta charset="utf-8"><title>Disaster response routing report · ${escapeHtml(detail.code)}</title><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700;800&display=swap"><style>
-      *{box-sizing:border-box}body{font:14px/1.55 "Montserrat",Arial,sans-serif;color:#14243a;margin:36px auto;max-width:900px;padding:0 28px}h1{font-size:24px;margin:0 0 5px;color:#12345a}h2{font-size:17px;margin:25px 0 8px;border-bottom:1px solid #cbd9e8;padding-bottom:6px}h3{font-size:15px;margin:0 0 8px;color:#125ca1}h4{margin:12px 0 5px;color:#1269b5}h5{margin:8px 0 4px}.sub,.muted{color:#5d6f83;font-size:12px}.box{border:1px solid #d4e2ef;border-radius:10px;padding:14px 16px;margin-top:12px;background:#f5f9fd}section{break-inside:avoid;border:1px solid #d8e4ef;border-radius:10px;padding:14px 16px;margin:12px 0}.route{border-left:3px solid #3186d8;padding:2px 0 2px 13px;margin:13px 0}ol{padding-left:22px;margin:6px 0}li{margin:4px 0}a{color:#075ea8;overflow-wrap:anywhere}.map-image{width:100%;max-height:480px;object-fit:contain;border:1px solid #d4e2ef;border-radius:8px}figcaption{font-size:11px;color:#66788b;margin-top:5px}.footer{margin-top:30px;border-top:1px solid #d7e1eb;padding-top:10px;font-size:11px;color:#66788b}@media print{body{margin:0 auto;padding:0 12px}.box,section{background:#fff;break-inside:avoid}figure{break-inside:avoid}}
-      .imagery-table{width:100%;border-collapse:collapse;font-size:11px}.imagery-table th,.imagery-table td{border:1px solid #d4e2ef;padding:7px;text-align:left;vertical-align:top}.imagery-table th{background:#f5f9fd;color:#38516a}
-    </style></head><body><h1>Disaster response · cluster routing report</h1><div class="sub">Generated ${escapeHtml(new Date().toLocaleString())} · Incident ${escapeHtml(detail.code)} · ${escapeHtml(detail.mode === "live" ? "Live Copernicus EMS" : "Demo / historical")}</div><div class="box"><b>${escapeHtml(detail.name)}</b><br>${escapeHtml(detail.category)} · ${escapeHtml(detail.state || detail.countries.join(", "))}<p>${escapeHtml(shortDescription)}</p><b>Main affected region:</b> ${escapeHtml(mainCoordinates)}<br><b>Source:</b> ${escapeHtml(detail.source)} · Updated ${escapeHtml(detail.relativeUpdate || detail.lastUpdate || "time unavailable")}</div><h2>Affected region and map</h2><p>${detail.affectedAreaKm2 == null ? "Affected area size unavailable" : `${detail.affectedAreaKm2} km²`} · ${escapeHtml(detail.state || detail.countries.join(", "))}</p>${mapSection}<ul>${affectedZones || "<li>Boundary coordinates unavailable.</li>"}</ul><h2>Satellite image acquisitions</h2><p class="muted">Copernicus EMS supplies acquisition metadata here, not directly embeddable source-scene pixels. The map above is the Esri basemap with ResQMap overlays. Open the official analysis-product archive for source-provided mapping outputs.</p>${imageryContent}${imageSource}<h2>Cluster-to-hospital routes</h2><p class="muted">Road-network results from ${escapeHtml(routingProvider.toUpperCase())}. The Google Maps link in every route opens its own cluster origin and destination. Distances and ETAs may not reflect live traffic or closures.</p>${clusterContent || "<p>No cluster route data is currently available.</p>"}<div class="footer">Operational reference only. Verify current road conditions, hospital operations, and route safety before dispatch.</div><script>window.addEventListener("load",()=>setTimeout(()=>window.print(),250));</script></body></html>`;
+    const reportHtml = `<!doctype html>
+      <html><head><meta charset="utf-8"><title>Response report - ${escapeHtml(detail.code)}</title>
+      <style>
+        *{box-sizing:border-box} @page{margin:14mm} body{font:12px/1.5 Arial,sans-serif;color:#152536;margin:24px auto;max-width:860px;padding:0 24px}
+        .masthead{margin:0 -24px 18px;padding:18px 24px 16px;background:#071321;color:#e8f3ff;border-bottom:3px solid #00a8d8;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+        .brandline{display:flex;align-items:center;justify-content:space-between;gap:14px;color:#a7bdcd;font:10px ui-monospace,Menlo,monospace;letter-spacing:.12em;text-transform:uppercase}
+        .brand{font-weight:700;color:#e8f3ff}.prototype{border:1px solid #80662f;padding:4px 7px;color:#ead8a8;font-size:8px}
+        h1{font-size:22px;line-height:1.2;margin:15px 0 4px;color:#fff}h2{font-size:15px;margin:20px 0 7px;padding-bottom:5px;border-bottom:1px solid #cad7e2;color:#123c59}
+        h3{font-size:13px;margin:0;color:#154c70}h4{font-size:12px;margin:8px 0 6px;color:#152536}.sub,.muted{font-size:10px;color:#5e7180}.incident{border:1px solid #d5e0e8;border-left:3px solid #1386b0;padding:12px 14px;background:#f3f7f9}
+        section.cluster{break-inside:avoid;border:1px solid #d5e0e8;padding:11px 13px;margin:10px 0}.cluster-heading{display:flex;align-items:center;justify-content:space-between;gap:12px}.severity{border:1px solid #b5c9d7;padding:2px 6px;color:#27516a;font:9px ui-monospace,Menlo,monospace;text-transform:uppercase}
+        .route{border-top:1px solid #e2e8ee;padding-top:5px;margin-top:8px}.route-metrics{display:flex;gap:20px;margin:7px 0}.route-metrics span{display:flex;flex-direction:column;min-width:90px}.route-metrics b{font:600 12px ui-monospace,Menlo,monospace;color:#064c69}.route-metrics small{font-size:8px;color:#677c8c;text-transform:uppercase;letter-spacing:.07em}
+        a{color:#075c86;overflow-wrap:anywhere}.map-image{width:100%;max-height:420px;object-fit:contain;border:1px solid #d4e2ef}figcaption{font-size:9px;color:#66788b;margin-top:4px}.imagery-table{width:100%;border-collapse:collapse;font-size:9px}.imagery-table th,.imagery-table td{border:1px solid #d4e2ef;padding:6px;text-align:left;vertical-align:top}.imagery-table th{background:#edf3f6;color:#38516a}
+        .footer{margin-top:22px;border-top:1px solid #ccd7e0;padding-top:8px;font-size:9px;color:#61717e}@media print{body{margin:0 auto;padding:0 8px}.masthead{margin:0 -8px 14px}.incident,section.cluster{break-inside:avoid}figure{break-inside:avoid}}
+      </style></head><body><header class="masthead"><div class="brandline"><span class="brand">NDRF · Disaster Response Command Center</span><span class="prototype">AUTHORIZED PROTOTYPE ENVIRONMENT</span></div><h1>Incident response report</h1><div class="brandline">Generated ${escapeHtml(new Date().toLocaleString())} · ${escapeHtml(detail.code)} · ${escapeHtml(detail.mode === "live" ? "Live Copernicus EMS" : "Demo / historical")}</div></header>
+      <div class="incident"><b>${escapeHtml(detail.name)}</b><br>${escapeHtml(detail.category)} · ${escapeHtml(detail.state || detail.countries.join(", "))}<p>${escapeHtml(shortDescription)}</p><b>Main affected region:</b> ${escapeHtml(mainCoordinates)}<br><b>Source:</b> ${escapeHtml(detail.source)} · Updated ${escapeHtml(detail.relativeUpdate || detail.lastUpdate || "time unavailable")}</div>
+      <h2>Affected region</h2><p>${detail.affectedAreaKm2 == null ? "Affected area size unavailable" : `${detail.affectedAreaKm2} km²`} · ${escapeHtml(detail.state || detail.countries.join(", "))}</p>${mapSection}<ul>${affectedZones || "<li>Boundary coordinates unavailable.</li>"}</ul>
+      <h2>Satellite acquisitions</h2><p class="muted">Source acquisition metadata from Copernicus EMS. The map snapshot uses the configured satellite basemap and response overlays.</p>${imageryContent}${imageSource}
+      <h2>Nearest cluster routes</h2><p class="muted">Each recommendation is the closest validated road route returned for its cluster. Travel times are estimates without live traffic. Hospital capacity and operations require field confirmation.</p>${clusterContent || "<p class=\"muted\">No cluster route data is currently available.</p>"}
+      <div class="footer">Prototype operational reference. Confirm current roads, facility status, and route safety before dispatch.</div></body></html>`;
     const reportDocument = reportFrame.contentDocument;
     const reportWindow = reportFrame.contentWindow;
     if (!reportDocument || !reportWindow) {
@@ -492,6 +602,8 @@ export default function App() {
         liveIndia={liveIndia}
         isRefreshing={isRefreshing}
         onRefresh={() => setRefreshSequence((sequence) => sequence + 1)}
+        operatorEmail={operatorEmail}
+        onLogout={onLogout}
       />
       {(loadError || notice) && (
         <div
@@ -659,10 +771,11 @@ export default function App() {
               <div className="mt-2 space-y-1 border-t border-white/10 pt-2 text-[10px] text-slate-400">
                 <div className="flex items-center gap-2"><span className="h-2 w-2 rounded-full border border-sky-200 bg-sky-400/40" /> Parent affected zone</div>
                 <div className="flex items-center gap-2"><span className="h-2 w-2 rounded-full border border-white bg-sky-500" /> Numbered child cluster</div>
-                <div className="flex items-center gap-2"><span className="h-2 w-2 rounded-full bg-teal-400" /> Hospital</div>
+                <div className="flex items-center gap-2"><span aria-hidden="true">🏥</span><span className="h-2 w-2 rounded-full bg-cyan-400" /> Hospital · status unknown</div>
+                <div className="pl-5 text-[9px] text-slate-500">Green available · amber limited · red high load when source data confirms</div>
                 <div className="flex items-center gap-2"><span className="h-0.5 w-3 bg-sky-400" /> Recommended route (cluster colour)</div>
                 <div className="flex items-center gap-2"><span className="h-0.5 w-3 bg-amber-400" /> Alternative road route</div>
-                <div className="flex items-center gap-2"><span className="h-2 w-2 rounded-full bg-orange-400" /> Fire</div>
+                <div className="flex items-center gap-2"><span aria-hidden="true">🔥</span><span className="h-2 w-2 rounded-full bg-orange-400" /> Fire station</div>
                 <div className="flex items-center gap-2"><span className="h-2 w-2 rounded-full bg-saffron" /> NDRF</div>
               </div>
           </CollapsibleSection>
@@ -718,7 +831,7 @@ export default function App() {
               >
                 <div className="mb-2 flex items-center justify-between">
                   <p className="text-[10px] text-slate-500">
-                    {clusterRoutes.length} AOI-sampled clusters · point radius {CLUSTER_CONFIG.radiusKm} km when observations are available
+                    {clusterRoutes.length} affected-area clusters · approx. {CLUSTER_CONFIG.radiusKm} km radius
                   </p>
                   {clusterRoutesLoading && <span className="text-[10px] font-medium text-sky-700">Finding routes…</span>}
                 </div>
@@ -880,7 +993,7 @@ export default function App() {
               )}
 
               <CollapsibleSection
-                title="HOSPITAL DETAILS · NEARBY DIRECTORY"
+                title="🏥 NEARBY HOSPITALS"
                 icon={HospitalIcon}
                 className="border-b border-slate-200 p-4"
                 contentClassName="mt-2"
@@ -899,10 +1012,11 @@ export default function App() {
                     >
                       <div className="flex items-start justify-between gap-2">
                         <div>
-                          <div className="text-[12px] font-medium text-slate-900">{h.name}</div>
+                          <div className="flex items-start gap-1.5 text-[12px] font-medium text-slate-900"><span aria-hidden="true">🏥</span><span>{h.name}</span></div>
                           <div className="text-[10px] text-slate-400">
                             {h.district} · {h.category} · Emergency {h.emergency ? "yes" : "unspecified"}
                           </div>
+                          <div className="mt-1 text-[9px] uppercase tracking-wide text-slate-500">{hospitalAvailabilityStatus(h)}</div>
                         </div>
                         <div className="text-right font-mono text-[11px] text-sky-700">
                           {h.distanceKm} km
@@ -949,9 +1063,12 @@ export default function App() {
                       selectedFacility?.id === facility.id ? "border-sky-300 bg-sky-50" : "border-slate-200 bg-white hover:bg-slate-50"
                     }`}
                   >
-                    <span className="min-w-0">
-                      <span className="block truncate text-xs font-medium text-slate-800">{facility.name}</span>
-                      <span className="mt-0.5 block text-[10px] text-slate-500">{facility.district}, {facility.state}</span>
+                    <span className="flex min-w-0 items-start gap-2">
+                      <span aria-hidden="true" className="mt-0.5">{facility.type === "fire_station" ? "🔥" : "🚑"}</span>
+                      <span className="min-w-0">
+                        <span className="block truncate text-xs font-medium text-slate-800">{facility.name}</span>
+                        <span className="mt-0.5 block text-[10px] text-slate-500">{facility.district}, {facility.state}</span>
+                      </span>
                     </span>
                     <span className="shrink-0 text-[10px] text-slate-500">{facility.distanceKm} km</span>
                   </button>
@@ -959,6 +1076,21 @@ export default function App() {
                 {!facilities.some((facility) => facility.type === "fire_station" || facility.type === "ambulance") && (
                   <p className="text-xs text-slate-500">No fire or ambulance locations in the current search radius.</p>
                 )}
+              </CollapsibleSection>
+
+              <CollapsibleSection
+                title="SYSTEM SECURITY"
+                icon={ShieldCheck}
+                className="border-b border-slate-200 p-4"
+                contentClassName="mt-2 space-y-1.5"
+              >
+                <DetailRow label="Authentication" value="Secure · server verified" />
+                <DetailRow label="Session" value={`Active · ${operatorEmail}`} />
+                <DetailRow label="Data channel" value={window.location.protocol === "https:" ? "HTTPS encrypted" : window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1" ? "Local HTTP · development" : "HTTP · not encrypted"} />
+                <DetailRow label="Satellite layer" value={layers.imagery ? "Enabled in map" : "Disabled by operator"} />
+                <DetailRow label="Routing engine" value={clusterRoutesLoading ? "Calculating routes" : clusterRoutesError ? "Unavailable" : clusterRoutes.length ? `${routingProvider.toUpperCase()} · ${clusterRoutes.reduce((count, cluster) => count + cluster.hospitalRoutes.length, 0)} validated routes${routeMatrixError ? " · matrix limited" : ""}` : "Awaiting incident"} />
+                <DetailRow label="Hospital data" value={hospitals.length ? `${hospitals.length} directory records · live load unknown` : loading ? "Loading directory" : "No nearby records returned"} />
+                <p className="pt-1 text-[9px] leading-relaxed text-slate-500">Prototype environment. No external government identity or operations network is connected.</p>
               </CollapsibleSection>
             </>
           ) : (

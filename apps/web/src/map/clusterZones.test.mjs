@@ -17,11 +17,26 @@ const sourceGeometry = {
 };
 const parentZones = [{ id: "test-AOI-1", name: "Observed test AOI", geometry: sourceGeometry }];
 
-test("AOI clusters are small, valid, and constrained to each source boundary", () => {
+test("default city cluster radius is approximately five kilometers", () => {
+  const wideZone = {
+    type: "Polygon",
+    coordinates: [[
+      [82.2, 22.0], [83.4, 22.0], [83.4, 23.0], [82.2, 23.0], [82.2, 22.0],
+    ]],
+  };
+  const [cluster] = buildAffectedClusters(
+    [{ id: "wide-AOI", name: "City impact zone", geometry: wideZone }],
+    { latitude: 22.5, longitude: 82.8 },
+    1
+  );
+  assert.ok(cluster.areaKm2 > 70 && cluster.areaKm2 < 82.47);
+});
+
+test("AOI clusters use an approximately 5 km footprint and stay inside their source boundary", () => {
   const clusters = buildAffectedClusters(parentZones, { latitude: 22.5, longitude: 82.8 }, 12);
   assert.ok(clusters.length > 1 && clusters.length <= 12);
   for (const cluster of clusters) {
-    assert.ok(cluster.areaKm2 > 0 && cluster.areaKm2 <= 0.57);
+    assert.ok(cluster.areaKm2 > 0 && cluster.areaKm2 <= 82.47);
     assert.ok(booleanPointInPolygon(point([cluster.longitude, cluster.latitude]), feature(cluster.geometry)));
     assert.ok(area(feature(cluster.geometry)) > 0);
   }
@@ -75,9 +90,24 @@ test("generated AOI cells pass backend source-boundary validation across demo in
       severityBasis: "demonstration-data",
     });
     assert.ok(verified.length > 0, incident.code);
-    assert.ok(verified.every((cluster) => cluster.areaKm2 <= 0.75), incident.code);
+    assert.ok(verified.every((cluster) => cluster.areaKm2 <= 82.47), incident.code);
     assert.ok(verified.every((cluster) => cluster.originMethod.includes("source-AOI")), incident.code);
     counts.push(verified.length);
   }
   assert.ok(new Set(counts).size > 1);
+});
+
+test("Mumbai city-scale AOI receives multiple approximately five-kilometer clusters", () => {
+  const incident = DEMO_INCIDENTS.find(({ code }) => code === "DEMO-MH-UF-2025");
+  const zones = incident.aois.map((aoi) => ({
+    id: `${incident.code}-AOI-${aoi.number}`,
+    name: aoi.name,
+    geometry: aoi.extentGeoJSON,
+  }));
+  const clusters = buildAffectedClusters(zones, incident.centroid, 12, {
+    incidentSeverity: incident.severity,
+  });
+  const validated = validateAffectedClusters(clusters, incident);
+  assert.ok(validated.length > 1);
+  assert.ok(validated.every((cluster) => cluster.areaKm2 <= 82.47));
 });

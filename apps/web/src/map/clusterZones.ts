@@ -11,14 +11,12 @@ import {
   point,
   pointOnFeature,
   polygon,
-  buffer,
   squareGrid,
 } from "@turf/turf";
 import type { Feature, MultiPolygon, Polygon } from "geojson";
 
-const CLUSTER_CELL_SIZE_KM = 0.75;
-const OPERATIONAL_CLUSTER_RADIUS_KM = 0.35;
-const TARGET_AREA_PER_CLUSTER_KM2 = 50;
+const OPERATIONAL_CLUSTER_RADIUS_KM = 5;
+const MAX_CLUSTER_AREA_KM2 = Math.PI * OPERATIONAL_CLUSTER_RADIUS_KM ** 2 * 1.05;
 const MAX_SAMPLES_PER_COMPONENT = 120;
 const MAX_POLYGON_COMPONENTS = 32;
 
@@ -124,7 +122,7 @@ function severityLabel(rank: number) {
 
 export function densityClusterPoints(
   impactPoints: ImpactPoint[],
-  { radiusKm = 0.75, minimumAffectedPoints = 3 }: Pick<ClusterConfig, "radiusKm" | "minimumAffectedPoints"> = {}
+  { radiusKm = 5, minimumAffectedPoints = 3 }: Pick<ClusterConfig, "radiusKm" | "minimumAffectedPoints"> = {}
 ) {
   if (!Number.isFinite(radiusKm) || radiusKm <= 0 || !Number.isInteger(minimumAffectedPoints) || minimumAffectedPoints < 1) {
     throw new Error("DBSCAN radius and minimum affected-point count must be positive");
@@ -232,8 +230,9 @@ export function buildAffectedClusters(
   const configuredMaxClusters = Math.min(12, Math.max(1, config.maxClusters || maxClusters));
   const operationalRadiusKm = Math.min(
     OPERATIONAL_CLUSTER_RADIUS_KM,
-    (config.radiusKm || 0.75) / 2
+    config.radiusKm || OPERATIONAL_CLUSTER_RADIUS_KM
   );
+  const targetAreaPerClusterKm2 = Math.PI * operationalRadiusKm ** 2;
   if (config.impactPoints?.length) {
     const pointCandidates: ClusterCandidate[] = [];
     const assignedSourcePoints = new Set<string>();
@@ -258,19 +257,15 @@ export function buildAffectedClusters(
         const features = group.map((item) => point([item.longitude, item.latitude]));
         const hull = impactPointHull(features);
         if (!hull) continue;
-        const paddedHull = buffer(hull, Math.min(0.05, (config.radiusKm || 0.75) / 10), { units: "kilometers" });
-        if (!paddedHull) continue;
+        const groupCenter = getRepresentative(hull);
+        const clusterFootprint = circle(groupCenter, operationalRadiusKm, { units: "kilometers", steps: 24 });
         const clipped = parentFeatures
-          .map((parentFeature) => intersect(featureCollection([paddedHull, parentFeature])))
+          .map((parentFeature) => intersect(featureCollection([clusterFootprint, parentFeature])))
           .filter((item): item is PolygonFeature => Boolean(item));
         if (!clipped.length) continue;
-        const feature = clipped.reduce((largest, item) =>
-          area(item) > area(largest) ? item : largest
-        ) as PolygonFeature;
-        const areaKm2 = area(feature) / 1_000_000;
         for (const feature of clipped.flatMap((item) => toPolygonFeatures(item.geometry))) {
           const areaKm2 = area(feature) / 1_000_000;
-          if (areaKm2 < 0.01 || areaKm2 > CLUSTER_CELL_SIZE_KM ** 2) continue;
+          if (areaKm2 < 0.01 || areaKm2 > MAX_CLUSTER_AREA_KM2) continue;
           pointCandidates.push({
             parentZone,
             componentId: `${parentZone.id}:observed-points`,
@@ -290,7 +285,15 @@ export function buildAffectedClusters(
       (b.severityPriority || 0) - (a.severityPriority || 0) ||
       b.areaKm2 - a.areaKm2
     );
-    return pointCandidates.slice(0, configuredMaxClusters).map((candidate, index) => ({
+    const nonOverlapping: ClusterCandidate[] = [];
+    for (const candidate of pointCandidates) {
+      const overlaps = nonOverlapping.some((chosen) => {
+        const overlap = intersect(featureCollection([candidate.feature, chosen.feature]));
+        return Boolean(overlap) && area(overlap) / 1_000_000 > 0.005;
+      });
+      if (!overlaps) nonOverlapping.push(candidate);
+    }
+    return nonOverlapping.slice(0, configuredMaxClusters).map((candidate, index) => ({
       id: `${candidate.parentZone.id}-D${index + 1}`,
       name: `Density cluster ${index + 1}`,
       parentZoneId: candidate.parentZone.id,
@@ -335,7 +338,7 @@ export function buildAffectedClusters(
         (bounds[2] - bounds[0]) * longitudeScaleKm *
         (bounds[3] - bounds[1]) * latitudeScaleKm;
       const sampleSpacingKm = Math.max(
-        1,
+        operationalRadiusKm,
         Math.sqrt(Math.max(componentAreaKm2, boundingAreaKm2) / MAX_SAMPLES_PER_COMPONENT)
       );
       const samples = squareGrid(bounds, sampleSpacingKm, { units: "kilometers" });
@@ -353,7 +356,7 @@ export function buildAffectedClusters(
         if (!child) continue;
         for (const feature of toPolygonFeatures(child.geometry)) {
           const childAreaKm2 = area(feature) / 1_000_000;
-          if (childAreaKm2 < 0.01 || childAreaKm2 > CLUSTER_CELL_SIZE_KM ** 2) continue;
+          if (childAreaKm2 < 0.01 || childAreaKm2 > MAX_CLUSTER_AREA_KM2) continue;
           candidates.push({
             parentZone,
             componentId,
@@ -366,18 +369,33 @@ export function buildAffectedClusters(
     }
   }
 
-  if (!candidates.length && fallback && parentZones.length) {
-    const { latitude, longitude } = fallback;
-    return [{
-      id: `${parentZones[0].id}-C1`,
-      name: "Cluster 1",
-      parentZoneId: parentZones[0].id,
-      parentZoneName: parentZones[0].name,
-      latitude,
-      longitude,
-      areaKm2: null,
-      geometry: null,
-    }];
+  if (!candidates.length && parentZones.length) {
+    for (const parentZone of parentZones) {
+      if (!parentZone.geometry) continue;
+      for (const parentFeature of toPolygonFeatures(parentZone.geometry).filter(booleanValid)) {
+        const center = fallback
+          ? point([fallback.longitude, fallback.latitude])
+          : getRepresentative(parentFeature);
+        const footprint = circle(center, operationalRadiusKm, { units: "kilometers", steps: 24 });
+        const clipped = intersect(featureCollection([footprint, parentFeature]));
+        if (!clipped) continue;
+        const candidate = toPolygonFeatures(clipped.geometry)
+          .map((feature) => ({ feature, areaKm2: area(feature) / 1_000_000 }))
+          .find((item) => item.areaKm2 >= 0.005 && item.areaKm2 <= MAX_CLUSTER_AREA_KM2);
+        if (!candidate) continue;
+        const representative = getRepresentative(candidate.feature);
+        return [{
+          id: `${parentZone.id}-C1`,
+          name: "Cluster 1",
+          parentZoneId: parentZone.id,
+          parentZoneName: parentZone.name,
+          longitude: representative.geometry.coordinates[0],
+          latitude: representative.geometry.coordinates[1],
+          areaKm2: Number(candidate.areaKm2.toFixed(2)),
+          geometry: candidate.feature.geometry,
+        }];
+      }
+    }
   }
 
   const componentIdsWithCandidates = new Set(candidates.map((candidate) => candidate.componentId));
@@ -389,7 +407,7 @@ export function buildAffectedClusters(
     configuredMaxClusters,
     Math.max(
       routableComponents.length,
-      Math.ceil(totalAreaKm2 / TARGET_AREA_PER_CLUSTER_KM2),
+      Math.ceil(totalAreaKm2 / targetAreaPerClusterKm2),
       1
     )
   );
@@ -397,17 +415,25 @@ export function buildAffectedClusters(
   const selected: ClusterCandidate[] = [];
   for (const component of routableComponents.slice(0, desiredCount)) {
     const componentCandidates = candidates.filter((candidate) => candidate.componentId === component.id);
-    const nearestCenterCell = componentCandidates.reduce((best, candidate) =>
-      distance(candidate.representative, component.representative, { units: "kilometers" }) <
-      distance(best.representative, component.representative, { units: "kilometers" })
-        ? candidate
-        : best
-    );
-    selected.push(nearestCenterCell);
+    const startsAtEdge = component.areaKm2 < targetAreaPerClusterKm2 * 3;
+    const seed = componentCandidates.reduce((best, candidate) => {
+      const candidateDistance = distance(candidate.representative, component.representative, { units: "kilometers" });
+      const bestDistance = distance(best.representative, component.representative, { units: "kilometers" });
+      return startsAtEdge
+        ? candidateDistance > bestDistance ? candidate : best
+        : candidateDistance < bestDistance ? candidate : best;
+    });
+    selected.push(seed);
   }
 
   while (selected.length < Math.min(desiredCount, candidates.length)) {
-    const remaining = candidates.filter((candidate) => !selected.includes(candidate));
+    const remaining = candidates.filter((candidate) =>
+      !selected.includes(candidate) &&
+      !selected.some((chosen) => {
+        const overlap = intersect(featureCollection([candidate.feature, chosen.feature]));
+        return Boolean(overlap) && area(overlap) / 1_000_000 > 0.005;
+      })
+    );
     if (!remaining.length) break;
     const next = remaining.reduce((best, candidate) => {
       const nearestDistance = (item: ClusterCandidate) => Math.min(
@@ -416,7 +442,7 @@ export function buildAffectedClusters(
         )
       );
       const score = (item: ClusterCandidate) =>
-        nearestDistance(item) + Math.min(item.areaKm2, CLUSTER_CELL_SIZE_KM ** 2) * 0.1;
+        nearestDistance(item) + Math.min(item.areaKm2, MAX_CLUSTER_AREA_KM2) * 0.1;
       return score(candidate) > score(best) ? candidate : best;
     });
     selected.push(next);

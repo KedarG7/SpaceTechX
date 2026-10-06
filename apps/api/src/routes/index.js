@@ -22,8 +22,9 @@ import { listAudit, recordAudit } from "../services/auditService.js";
 import { answerOperator, generateSitrep } from "../services/intelligenceService.js";
 import { validateAffectedClusters } from "../services/clusterValidation.js";
 import {
-  assignDistinctRecommendations,
   rankHospitalCandidates,
+  rankNearestRoadCandidates,
+  rankNearestRoutedCandidates,
   routeScoringWeights,
 } from "../services/hospitalRanking.js";
 import { haversineKm } from "../utils/geo.js";
@@ -197,13 +198,13 @@ api.post("/disasters/:id/cluster-routes", async (req, res) => {
     return res.status(400).json({ error: error.message || "Invalid affected-area clusters" });
   }
   const clusterConfig = req.body?.clusterConfig || {};
-  const clusterRadiusKm = Number(clusterConfig.radiusKm ?? 0.75);
+  const clusterRadiusKm = Number(clusterConfig.radiusKm ?? 5);
   const minimumAffectedPoints = Number(clusterConfig.minimumAffectedPoints ?? 3);
   const requestedMaxClusters = Number(clusterConfig.maxClusters ?? clusters.length);
   if (
     !Number.isFinite(clusterRadiusKm) ||
     clusterRadiusKm <= 0 ||
-    clusterRadiusKm > 20 ||
+    clusterRadiusKm > 5 ||
     !Number.isInteger(minimumAffectedPoints) ||
     minimumAffectedPoints < 1 ||
     minimumAffectedPoints > 100 ||
@@ -267,20 +268,18 @@ api.post("/disasters/:id/cluster-routes", async (req, res) => {
       );
       return { cluster, hospitals, roadCandidates, ranked };
     });
-    const initialAssignments = assignDistinctRecommendations(
-      candidatesWithMatrix.map(({ cluster, ranked }) => ({ ...cluster, candidates: ranked }))
-    );
-
-    const routeResults = await Promise.all(
+      const routeResults = await Promise.all(
       candidatesWithMatrix.map(async ({ cluster, hospitals, roadCandidates, ranked }) => {
         const candidateLimit = Math.max(maxRouteCandidates + 1, 5);
-        const candidateIds = new Set(ranked.slice(0, candidateLimit).map(({ hospital }) => hospital.id));
+        const candidateIds = new Set(
+          rankNearestRoadCandidates(roadCandidates)
+            .slice(0, candidateLimit)
+            .map(({ hospital }) => hospital.id)
+        );
         for (const hospital of hospitals.slice(0, candidateLimit)) {
           if (candidateIds.size >= candidateLimit) break;
           candidateIds.add(hospital.id);
         }
-        const initiallyAssignedId = initialAssignments.get(cluster.id);
-        if (initiallyAssignedId) candidateIds.add(initiallyAssignedId);
         const selectedCandidates = hospitals
           .filter((hospital) => candidateIds.has(hospital.id))
           .map((hospital) => ({
@@ -337,14 +336,10 @@ api.post("/disasters/:id/cluster-routes", async (req, res) => {
         };
       })
     );
-    const assignments = assignDistinctRecommendations(routeResults);
     const routedClusters = routeResults.map(({ cluster, candidates, rejectedCandidates, candidateScores, matrixCandidateCount }) => {
-      const assignedHospitalId = assignments.get(cluster.id) || null;
-      const ordered = [...candidates].sort((left, right) => {
-        if (left.hospital.id === assignedHospitalId) return -1;
-        if (right.hospital.id === assignedHospitalId) return 1;
-        return left.score - right.score;
-      }).slice(0, maxRouteCandidates);
+      const nearestFirst = rankNearestRoutedCandidates(candidates);
+      const assignedHospitalId = nearestFirst[0]?.hospital.id || null;
+      const ordered = nearestFirst.slice(0, maxRouteCandidates);
       const hospitalRoutes = ordered.map((candidate, index) => ({
         id: `${cluster.id}:${candidate.hospital.id}`,
         rank: index + 1,
@@ -372,8 +367,8 @@ api.post("/disasters/:id/cluster-routes", async (req, res) => {
         scoreWeights: candidate.scoreWeights,
         rankingBasis: "Validated OSRM/OpenRouteService route geometry, estimated road travel time/distance, and published emergency listing. Live traffic, closures, and hospital availability are not supplied.",
         selectionReason: candidate.hospital.id === assignedHospitalId
-          ? "Proposed distinct hospital for this incident's severity-prioritized cluster; hospital capacity/availability is unverified."
-          : `Road route ranks ${candidate.score.toFixed(2)} on normalized route criteria; capacity/availability is unverified.`,
+          ? "Nearest validated road route for this affected cluster; small and local hospitals are considered equally. Capacity and availability are unverified."
+          : "Nearby validated alternative, ranked by road distance; capacity and availability are unverified.",
       }));
       return {
         ...cluster,
@@ -420,7 +415,7 @@ api.post("/disasters/:id/cluster-routes", async (req, res) => {
       generatedAt: new Date().toISOString(),
       routingProvider: getRoutingConfig(),
       scoreWeights: routeScoringWeights(),
-      rankingBasis: "All returned assignments require a validated road route and are scored on route time/distance, listed emergency capability, and availability confidence. No straight-line fallback is used.",
+      rankingBasis: "The recommendation is the nearest returned validated road route for each cluster. Additional nearby hospitals are alternatives; no straight-line fallback is used.",
       capacityAvailability: "Live hospital capacity/occupancy and operational status are unavailable; all assignments are proposals, not confirmed dispatches.",
       routeTimeBasis: "Estimated from the road network; live traffic is not included.",
       hospitalSourceQuality: "Compiled Government of India directory seed; facility coordinates/listings and operational status require field verification.",

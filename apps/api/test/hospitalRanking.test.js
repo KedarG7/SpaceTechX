@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import {
   assignDistinctRecommendations,
   rankHospitalCandidates,
+  rankNearestRoadCandidates,
+  rankNearestRoutedCandidates,
 } from "../src/services/hospitalRanking.js";
 
 function candidate(id, durationMin, roadKm, emergency = true) {
@@ -52,4 +54,26 @@ test("proposes distinct hospitals for separate clusters where candidates allow",
   ]);
   assert.equal(assignments.get("cluster-b"), "shared");
   assert.equal(assignments.get("cluster-a"), "hospital-a");
+});
+
+test("nearest validated local hospital takes priority regardless of size or emergency listing", () => {
+  const nearbySmall = {
+    ...candidate("local-clinic", 22, 6, false),
+    geographicKm: 2.1,
+    routeGeometry: { type: "LineString", coordinates: [[72.82, 19.02], [72.83, 19.03]] },
+  };
+  const fartherTertiary = {
+    ...candidate("tertiary-center", 14, 11, true),
+    geographicKm: 5.4,
+    routeGeometry: { type: "LineString", coordinates: [[72.81, 19.01], [72.86, 19.05]] },
+  };
+  const nearest = rankNearestRoutedCandidates([fartherTertiary, nearbySmall]);
+  assert.equal(nearest[0].hospital.id, "local-clinic");
+});
+
+test("road-matrix candidate selection keeps the nearest small local facility ahead of tertiary hospitals", () => {
+  const nearbySmall = { ...candidate("local-hospital", 19, 3.8, false), geographicKm: 2.2 };
+  const fartherTertiary = { ...candidate("tertiary-center", 16, 8.3, true), geographicKm: 4.9 };
+  const ranked = rankNearestRoadCandidates([fartherTertiary, nearbySmall]);
+  assert.equal(ranked[0].hospital.id, "local-hospital");
 });

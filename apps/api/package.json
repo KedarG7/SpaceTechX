@@ -3,8 +3,8 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "node src/index.js",
-    "start": "node src/index.js",
+    "dev": "node --env-file-if-exists=.env src/index.js",
+    "start": "node --env-file-if-exists=.env src/index.js",
     "test": "node --experimental-strip-types --test test/*.test.js ../web/src/map/clusterZones.test.mjs ../web/src/services/responseReport.test.mjs"
   },
   "dependencies": {

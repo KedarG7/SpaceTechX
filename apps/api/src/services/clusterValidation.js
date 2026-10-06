@@ -14,8 +14,8 @@ import {
 
 const MAX_CLUSTERS = 12;
 const MAX_VERTICES = 5000;
-const MAX_CLUSTER_AREA_KM2 = Number(process.env.MAX_CLUSTER_AREA_KM2) || 0.75;
-const MAX_CLUSTER_DIAMETER_KM = 2;
+const MAX_CLUSTER_AREA_KM2 = Number(process.env.MAX_CLUSTER_AREA_KM2) || 82.47;
+const MAX_CLUSTER_DIAMETER_KM = 15;
 
 function coordinateCount(value) {
   if (!Array.isArray(value)) return 0;
