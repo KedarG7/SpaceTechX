@@ -359,10 +359,10 @@ function Dashboard({
     return zones.length
       ? zones
       : [{
-          id: detail.code,
-          name: detail.name,
-          geometry: detail.extentGeoJSON || null,
-        }];
+        id: detail.code,
+        name: detail.name,
+        geometry: detail.extentGeoJSON || null,
+      }];
   }, [detail]);
   const clusterOrigins = useMemo(
     () => buildAffectedClusters(parentZones, detail?.centroid, CLUSTER_CONFIG.maxClusters, {
@@ -634,8 +634,8 @@ function Dashboard({
         ))}
       </div>
 
-      <div className="grid min-h-0 flex-1 grid-cols-1 overflow-y-auto lg:grid-cols-[260px_minmax(0,1fr)_390px] lg:overflow-hidden">
-        <aside className="dashboard-sidebar flex min-h-[330px] flex-col border-b lg:min-h-0 lg:border-b-0 lg:border-r">
+      <div className="grid min-h-0 flex-1 grid-cols-1 overflow-y-auto lg:grid-cols-[300px_minmax(0,1fr)_390px] lg:overflow-hidden">
+        <aside className="dashboard-sidebar flex min-h-[330px] flex-col border-b lg:min-h-0 lg:border-b-0">
           <div className="border-b border-slate-200 p-4">
             <div className="flex items-center justify-between">
               <div>
@@ -676,7 +676,7 @@ function Dashboard({
               </select>
             </div>
           </div>
-          <div className="min-h-0 flex-1 overflow-y-auto p-3">
+          <div className="min-h-0 flex-1 overflow-y-auto scroll-smooth p-3 motion-reduce:scroll-auto">
             {incidentGroups.map(([state, items]) => (
               <section key={state} className="mb-4">
                 <div className="mb-2 flex items-center justify-between px-1">
@@ -688,22 +688,20 @@ function Dashboard({
                     <button
                       key={item.id}
                       onClick={() => setSelectedId(item.id)}
-                      className={`w-full rounded-lg border p-3 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500 ${
-                        selectedId === item.id
-                          ? "border-sky-300 bg-sky-50 shadow-sm"
-                          : "border-slate-200 bg-white hover:border-sky-200 hover:bg-slate-50"
-                      }`}
+                      className={`w-full rounded-lg border p-3 text-left transition-colors duration-200 ease-linear motion-reduce:transition-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500 ${selectedId === item.id
+                        ? "border-sky-300 bg-sky-50 shadow-sm"
+                        : "border-slate-200 bg-white hover:border-sky-200 hover:bg-slate-50"
+                        }`}
                     >
                       <div className="flex items-center justify-between gap-2">
                         <span className="font-mono text-[10px] text-slate-400">{item.code}</span>
                         <span className="flex items-center gap-1">
-                          <span className={`rounded-full px-2 py-0.5 text-[9px] font-semibold uppercase ${
-                            item.severity === "critical"
-                              ? "border border-rose-400/30 bg-rose-500/10 text-rose-300"
-                              : item.severity === "high"
-                                ? "border border-amber-400/30 bg-amber-500/10 text-amber-200"
-                                : "border border-cyan-400/20 bg-cyan-400/5 text-cyan-200"
-                          }`}>
+                          <span className={`rounded-full px-2 py-0.5 text-[9px] font-semibold uppercase ${item.severity === "critical"
+                            ? "border border-rose-400/30 bg-rose-500/10 text-rose-300"
+                            : item.severity === "high"
+                              ? "border border-amber-400/30 bg-amber-500/10 text-amber-200"
+                              : "border border-cyan-400/20 bg-cyan-400/5 text-cyan-200"
+                            }`}>
                             {item.severity}
                           </span>
                           <span className={`rounded-full px-2 py-0.5 text-[9px] font-medium ${item.closed ? "bg-slate-100 text-slate-500" : "bg-emerald-50 text-emerald-700"}`}>
@@ -751,33 +749,33 @@ function Dashboard({
             className="glass-panel absolute left-3 top-3 z-10 w-60 rounded-2xl border p-3 shadow-panel"
             contentClassName="mt-2"
           >
-              {Object.entries({
-                imagery: "Satellite imagery",
-                aoi: "Affected area",
-                clusters: "Affected clusters",
-                hospitals: "Hospitals",
-                infrastructure: "Emergency facilities",
-                routes: "Cluster → hospital routes",
-              }).map(([k, label]) => (
-                <label key={k} className="flex items-center justify-between py-0.5 text-[11px] text-slate-300">
-                  {label}
-                  <input
-                    type="checkbox"
-                    checked={layers[k]}
-                    onChange={(e) => setLayers({ ...layers, [k]: e.target.checked })}
-                  />
-                </label>
-              ))}
-              <div className="mt-2 space-y-1 border-t border-white/10 pt-2 text-[10px] text-slate-400">
-                <div className="flex items-center gap-2"><span className="h-2 w-2 rounded-full border border-sky-200 bg-sky-400/40" /> Parent affected zone</div>
-                <div className="flex items-center gap-2"><span className="h-2 w-2 rounded-full border border-white bg-sky-500" /> Numbered child cluster</div>
-                <div className="flex items-center gap-2"><span aria-hidden="true">🏥</span><span className="h-2 w-2 rounded-full bg-cyan-400" /> Hospital · status unknown</div>
-                <div className="pl-5 text-[9px] text-slate-500">Green available · amber limited · red high load when source data confirms</div>
-                <div className="flex items-center gap-2"><span className="h-0.5 w-3 bg-sky-400" /> Recommended route (cluster colour)</div>
-                <div className="flex items-center gap-2"><span className="h-0.5 w-3 bg-amber-400" /> Alternative road route</div>
-                <div className="flex items-center gap-2"><span aria-hidden="true">🔥</span><span className="h-2 w-2 rounded-full bg-orange-400" /> Fire station</div>
-                <div className="flex items-center gap-2"><span className="h-2 w-2 rounded-full bg-saffron" /> NDRF</div>
-              </div>
+            {Object.entries({
+              imagery: "Satellite imagery",
+              aoi: "Affected area",
+              clusters: "Affected clusters",
+              hospitals: "Hospitals",
+              infrastructure: "Emergency facilities",
+              routes: "Cluster → hospital routes",
+            }).map(([k, label]) => (
+              <label key={k} className="flex items-center justify-between py-0.5 text-[11px] text-slate-300">
+                {label}
+                <input
+                  type="checkbox"
+                  checked={layers[k]}
+                  onChange={(e) => setLayers({ ...layers, [k]: e.target.checked })}
+                />
+              </label>
+            ))}
+            <div className="mt-2 space-y-1 border-t border-white/10 pt-2 text-[10px] text-slate-400">
+              <div className="flex items-center gap-2"><span className="h-2 w-2 rounded-full border border-sky-200 bg-sky-400/40" /> Parent affected zone</div>
+              <div className="flex items-center gap-2"><span className="h-2 w-2 rounded-full border border-white bg-sky-500" /> Numbered child cluster</div>
+              <div className="flex items-center gap-2"><span aria-hidden="true">🏥</span><span className="h-2 w-2 rounded-full bg-cyan-400" /> Hospital · status unknown</div>
+              <div className="pl-5 text-[9px] text-slate-500">Green available · amber limited · red high load when source data confirms</div>
+              <div className="flex items-center gap-2"><span className="h-0.5 w-3 bg-sky-400" /> Recommended route (cluster colour)</div>
+              <div className="flex items-center gap-2"><span className="h-0.5 w-3 bg-amber-400" /> Alternative road route</div>
+              <div className="flex items-center gap-2"><span aria-hidden="true">🔥</span><span className="h-2 w-2 rounded-full bg-orange-400" /> Fire station</div>
+              <div className="flex items-center gap-2"><span className="h-2 w-2 rounded-full bg-saffron" /> NDRF</div>
+            </div>
           </CollapsibleSection>
           {loading && (
             <div className="absolute right-3 top-3 rounded-md border border-white/70 bg-white/85 px-2.5 py-1.5 text-xs font-medium text-slate-700 shadow-sm backdrop-blur-xl">
@@ -905,24 +903,24 @@ function Dashboard({
                               onClick={() => selectRoute(route.id)}
                               className={`route-card w-full rounded-md border p-2.5 text-left ${route.id === selectedRouteId ? "border-sky-300 bg-sky-50" : "border-slate-200 bg-white"}`}
                             >
-                            <div className="flex items-center justify-between gap-2">
-                              <span className="flex min-w-0 items-center gap-1.5 truncate text-[10px] font-medium text-slate-800">
-                                <span className="grid h-5 w-5 shrink-0 place-items-center rounded-full bg-sky-100 font-mono text-[9px] text-sky-800">{route.rank}</span>
-                                <span className="truncate">{route.rank === 1 ? "Recommended" : route.rank === 2 ? "Alternative" : "Additional"} · {route.hospital.name}</span>
-                              </span>
-                              <span className={`shrink-0 text-[9px] ${route.routeStatus === "routed" ? "text-sky-300" : "text-amber-700"}`}>
-                                {route.routeStatus === "routed" ? "ROAD ROUTE" : "UNAVAILABLE"}
-                              </span>
-                            </div>
-                            <div className="mt-1.5 flex items-center gap-2 font-mono text-[10px] text-slate-600">
-                              <span className="rounded-md bg-slate-100 px-1.5 py-0.5">{route.roadKm == null ? "— km" : `${route.roadKm} km`}</span>
-                              <span className="rounded-md bg-slate-100 px-1.5 py-0.5">{route.durationMin == null ? "— min" : `${route.durationMin} min`}</span>
-                              <span className="text-[9px] text-slate-500">road network</span>
-                            </div>
-                            <p className="mt-1 text-[9px] text-slate-400">
-                              Score {route.score?.toFixed(2) ?? "—"} · time {route.scoreBreakdown?.travelTime ?? "—"} · distance {route.scoreBreakdown?.roadDistance ?? "—"} · severity {route.scoreBreakdown?.severity ?? "—"} · access {route.scoreBreakdown?.roadAccessibility ?? "—"} · capability {route.scoreBreakdown?.emergencyCapability ?? "—"} · availability {route.scoreBreakdown?.availability ?? "—"}
-                            </p>
-                            <p className="mt-0.5 text-[9px] text-slate-400">{route.selectionReason}</p>
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="flex min-w-0 items-center gap-1.5 truncate text-[10px] font-medium text-slate-800">
+                                  <span className="grid h-5 w-5 shrink-0 place-items-center rounded-full bg-sky-100 font-mono text-[9px] text-sky-800">{route.rank}</span>
+                                  <span className="truncate">{route.rank === 1 ? "Recommended" : route.rank === 2 ? "Alternative" : "Additional"} · {route.hospital.name}</span>
+                                </span>
+                                <span className={`shrink-0 text-[9px] ${route.routeStatus === "routed" ? "text-sky-300" : "text-amber-700"}`}>
+                                  {route.routeStatus === "routed" ? "ROAD ROUTE" : "UNAVAILABLE"}
+                                </span>
+                              </div>
+                              <div className="mt-1.5 flex items-center gap-2 font-mono text-[10px] text-slate-600">
+                                <span className="rounded-md bg-slate-100 px-1.5 py-0.5">{route.roadKm == null ? "— km" : `${route.roadKm} km`}</span>
+                                <span className="rounded-md bg-slate-100 px-1.5 py-0.5">{route.durationMin == null ? "— min" : `${route.durationMin} min`}</span>
+                                <span className="text-[9px] text-slate-500">road network</span>
+                              </div>
+                              <p className="mt-1 text-[9px] text-slate-400">
+                                Score {route.score?.toFixed(2) ?? "—"} · time {route.scoreBreakdown?.travelTime ?? "—"} · distance {route.scoreBreakdown?.roadDistance ?? "—"} · severity {route.scoreBreakdown?.severity ?? "—"} · access {route.scoreBreakdown?.roadAccessibility ?? "—"} · capability {route.scoreBreakdown?.emergencyCapability ?? "—"} · availability {route.scoreBreakdown?.availability ?? "—"}
+                              </p>
+                              <p className="mt-0.5 text-[9px] text-slate-400">{route.selectionReason}</p>
                             </button>
                             <a
                               href={googleMapsDirectionsUrl(cluster, route.hospital)}
@@ -959,36 +957,36 @@ function Dashboard({
                   className="border-b border-slate-200 p-4"
                   contentClassName="mt-2 space-y-1.5 text-[10px]"
                 >
-                    <DetailRow label="Cluster / parent" value={`${selectedRoute.cluster.name} (${selectedRoute.cluster.id}) / ${selectedRoute.cluster.parentZoneName}`} />
-                    <DetailRow label="Cluster coordinates" value={`${selectedRoute.cluster.latitude.toFixed(5)}, ${selectedRoute.cluster.longitude.toFixed(5)}`} />
-                    <DetailRow label="Hospital" value={selectedRoute.route.hospital.name} />
-                    <DetailRow label="Road route" value={selectedRoute.route.routeStatus === "routed" ? selectedRoute.route.routeSource : "Unavailable — no straight-line route substituted"} />
-                    <DetailRow label="Distance / ETA" value={`${selectedRoute.route.roadKm ?? "Unavailable"} km / ${selectedRoute.route.durationMin ?? "Unavailable"} min (estimated; no live traffic)`} />
-                    <DetailRow label="Hospital capacity" value="Unknown — no live capacity feed" />
-                    <DetailRow label="Road snap" value={`Origin ${selectedRoute.route.routeSnapDistanceKm?.origin ?? "—"} km · destination ${selectedRoute.route.routeSnapDistanceKm?.destination ?? "—"} km`} />
-                    <a
-                      href={googleMapsDirectionsUrl(selectedRoute.cluster, selectedRoute.route.hospital)}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="my-2 inline-flex items-center gap-1.5 text-xs font-medium text-sky-700 hover:text-sky-900"
-                    >
-                      <ExternalLink className="h-3.5 w-3.5" /> Open route in Google Maps
-                    </a>
-                    <div className="mt-2 rounded-lg border border-sky-100 bg-sky-50 p-3">
-                      <div className="mb-2 text-[9px] font-semibold uppercase tracking-wide text-sky-800">Route directions</div>
-                      {selectedRoute.route.routeDirections?.length ? (
-                        <ol className="space-y-1.5">
-                          {selectedRoute.route.routeDirections.map((step, index) => (
-                            <li key={`${selectedRoute.route.id}-step-${index}`} className="flex gap-2 text-[10px] leading-relaxed text-slate-700">
-                              <span className="grid h-4 w-4 shrink-0 place-items-center rounded-full bg-sky-100 font-mono text-[8px] text-sky-800">{index + 1}</span>
-                              <span>{step.instruction}<span className="text-slate-500">{step.distanceKm == null ? "" : ` · ${step.distanceKm} km`}{step.durationMin == null ? "" : ` · ${step.durationMin} min`}</span></span>
-                            </li>
-                          ))}
-                        </ol>
-                      ) : (
-                        <p className="text-[10px] text-slate-500">{selectedRoute.route.routeStatus === "routed" ? "Turn-by-turn directions are not available from the routing provider." : "Road route unavailable. No straight-line substitute is shown."}</p>
-                      )}
-                    </div>
+                  <DetailRow label="Cluster / parent" value={`${selectedRoute.cluster.name} (${selectedRoute.cluster.id}) / ${selectedRoute.cluster.parentZoneName}`} />
+                  <DetailRow label="Cluster coordinates" value={`${selectedRoute.cluster.latitude.toFixed(5)}, ${selectedRoute.cluster.longitude.toFixed(5)}`} />
+                  <DetailRow label="Hospital" value={selectedRoute.route.hospital.name} />
+                  <DetailRow label="Road route" value={selectedRoute.route.routeStatus === "routed" ? selectedRoute.route.routeSource : "Unavailable — no straight-line route substituted"} />
+                  <DetailRow label="Distance / ETA" value={`${selectedRoute.route.roadKm ?? "Unavailable"} km / ${selectedRoute.route.durationMin ?? "Unavailable"} min (estimated; no live traffic)`} />
+                  <DetailRow label="Hospital capacity" value="Unknown — no live capacity feed" />
+                  <DetailRow label="Road snap" value={`Origin ${selectedRoute.route.routeSnapDistanceKm?.origin ?? "—"} km · destination ${selectedRoute.route.routeSnapDistanceKm?.destination ?? "—"} km`} />
+                  <a
+                    href={googleMapsDirectionsUrl(selectedRoute.cluster, selectedRoute.route.hospital)}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="my-2 inline-flex items-center gap-1.5 text-xs font-medium text-sky-700 hover:text-sky-900"
+                  >
+                    <ExternalLink className="h-3.5 w-3.5" /> Open route in Google Maps
+                  </a>
+                  <div className="mt-2 rounded-lg border border-sky-100 bg-sky-50 p-3">
+                    <div className="mb-2 text-[9px] font-semibold uppercase tracking-wide text-sky-800">Route directions</div>
+                    {selectedRoute.route.routeDirections?.length ? (
+                      <ol className="space-y-1.5">
+                        {selectedRoute.route.routeDirections.map((step, index) => (
+                          <li key={`${selectedRoute.route.id}-step-${index}`} className="flex gap-2 text-[10px] leading-relaxed text-slate-700">
+                            <span className="grid h-4 w-4 shrink-0 place-items-center rounded-full bg-sky-100 font-mono text-[8px] text-sky-800">{index + 1}</span>
+                            <span>{step.instruction}<span className="text-slate-500">{step.distanceKm == null ? "" : ` · ${step.distanceKm} km`}{step.durationMin == null ? "" : ` · ${step.durationMin} min`}</span></span>
+                          </li>
+                        ))}
+                      </ol>
+                    ) : (
+                      <p className="text-[10px] text-slate-500">{selectedRoute.route.routeStatus === "routed" ? "Turn-by-turn directions are not available from the routing provider." : "Road route unavailable. No straight-line substitute is shown."}</p>
+                    )}
+                  </div>
                 </CollapsibleSection>
               )}
 
@@ -1006,9 +1004,8 @@ function Dashboard({
                     <button
                       key={h.id}
                       onClick={() => selectHospital(h.id)}
-                      className={`w-full rounded-lg border px-2.5 py-2 text-left ${
-                        hospitalId === h.id ? "border-sky-300 bg-sky-50" : "border-slate-200 bg-white"
-                      }`}
+                      className={`w-full rounded-lg border px-2.5 py-2 text-left ${hospitalId === h.id ? "border-sky-300 bg-sky-50" : "border-slate-200 bg-white"
+                        }`}
                     >
                       <div className="flex items-start justify-between gap-2">
                         <div>
@@ -1059,9 +1056,8 @@ function Dashboard({
                     key={facility.id}
                     type="button"
                     onClick={() => setSelectedFacility(facility)}
-                    className={`flex w-full items-center justify-between gap-3 rounded-md border px-3 py-2 text-left transition ${
-                      selectedFacility?.id === facility.id ? "border-sky-300 bg-sky-50" : "border-slate-200 bg-white hover:bg-slate-50"
-                    }`}
+                    className={`flex w-full items-center justify-between gap-3 rounded-md border px-3 py-2 text-left transition ${selectedFacility?.id === facility.id ? "border-sky-300 bg-sky-50" : "border-slate-200 bg-white hover:bg-slate-50"
+                      }`}
                   >
                     <span className="flex min-w-0 items-start gap-2">
                       <span aria-hidden="true" className="mt-0.5">{facility.type === "fire_station" ? "🔥" : "🚑"}</span>
